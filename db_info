@@ -1,0 +1,18 @@
+develop
+
+hosts : db.nqtvvvodxsfywwsbdoto.supabase.co
+nqtvvvodxsfywwsbdoto
+cfFvi9ykfYUKajpa - пароль
+sbp_fd34f117be122fab5acf3085e1134bce7aea7354 - токен
+pg_restore -c -d postgresql://postgres:cfFvi9ykfYUKajpa@db.nqtvvvodxsfywwsbdoto.supabase.co:5432/postgres < dev_full_20230410_125732.dmp
+psql 'postgresql://postgres:cfFvi9ykfYUKajpa@db.nqtvvvodxsfywwsbdoto.supabase.co:5432/postgres' < dev_inserts_20230410_130046.sql
+
+production
+
+hosts : db.tibneuvcdpsaefnkddpv.supabase.co
+tibneuvcdpsaefnkddpv
+SFJayoCY3Vfr87PS - пароль
+sbp_fd34f117be122fab5acf3085e1134bce7aea7354 - токен
+pg_restore -c -d postgresql://postgres:SFJayoCY3Vfr87PS@db.tibneuvcdpsaefnkddpv.supabase.co:5432/postgres < dev_full_20230410_125732.dmp
+psql 'postgresql://postgres:SFJayoCY3Vfr87PS@db.tibneuvcdpsaefnkddpv.supabase.co:5432/postgres' < dev_inserts_20230410_130046.sql
+
