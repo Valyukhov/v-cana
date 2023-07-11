@@ -5,20 +5,20 @@ import { useRouter } from 'next/router'
 
 import { useTranslation } from 'next-i18next'
 
-import { supabase } from 'utils/supabaseClient'
-
 import SwitchLocalization from './SwitchLocalization'
 import SignOut from './SignOut'
 
 import { useRedirect } from 'utils/hooks'
 
 import { useCurrentUser } from 'lib/UserContext'
+import useSupabaseClient from 'utils/supabaseClient'
 
 import Report from 'public/error-outline.svg'
 import EyeIcon from 'public/eye-icon.svg'
 import EyeOffIcon from 'public/eye-off-icon.svg'
 
 function Login() {
+  const supabase = useSupabaseClient()
   const [showPassword, setShowPassword] = useState(false)
   const [password, setPassword] = useState('')
   const [error, setError] = useState(false)
@@ -39,7 +39,6 @@ function Login() {
     if (passwordRef?.current) {
       passwordRef.current.focus()
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [showPassword])
 
   useEffect(() => {
@@ -54,13 +53,12 @@ function Login() {
       setError(false)
       router.push(agreement && confession ? `/account` : '/agreements')
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [user])
+  }, [router, user])
 
   const handleLogin = async (e) => {
     e.preventDefault()
     try {
-      const { error } = await supabase.auth.signIn({
+      const { error } = await supabase.auth.signInWithPassword({
         email: login,
         password,
       })
@@ -86,8 +84,8 @@ function Login() {
             <div>
               {t('Email')} {user.email}
             </div>
-            <Link href={href ?? '/'}>
-              <a className=" text-blue-450">{t('GoToAccount')}</a>
+            <Link href={href ?? '/'} className="text-cyan-500 hover:text-gray-400">
+              {t('GoToAccount')}
             </Link>
           </div>
 
@@ -98,7 +96,7 @@ function Login() {
       ) : (
         <div className="flex flex-col p-5 lg:py-10 xl:px-8">
           <div className="flex justify-between mb-6">
-            <h1 className="text-2xl xl:text-4xl lg:text-3xl font-bold">{t('SignIn')}</h1>
+            <h1 className="text-2xl lg:text-3xl xl:text-4xl font-bold">{t('SignIn')}</h1>
             <SwitchLocalization />
           </div>
           <div className="flex flex-col lg:flex-row text-sm lg:text-base">
@@ -108,8 +106,9 @@ function Login() {
                 '/'
                 // TODO сделать функционал отправки формы администратору
               }
+              className="mb-6 lg:mb-14 text-cyan-700 hover:text-gray-400"
             >
-              <a className="mb-6 lg:mb-14 text-blue-600">{t('WriteAdministrator')}</a>
+              {t('WriteAdministrator')}
             </Link>
           </div>
 
@@ -179,7 +178,7 @@ function Login() {
                 disabled={loading}
                 onClick={handleLogin}
                 className={`${
-                  loading ? 'btn' : 'btn-blue'
+                  loading ? 'btn' : 'btn-cyan'
                 } w-1/2 lg:w-1/3 mb-4 lg:mb-0 lg:text-lg font-bold`}
                 value={t('SignIn')}
               />
@@ -188,8 +187,9 @@ function Login() {
                   '/'
                   // TODO сделать восстановление пароля
                 }
+                className="text-sm lg:text-base text-cyan-700 hover:text-gray-400"
               >
-                <a className="text-sm lg:text-base">{t('RestoreAccess')}</a>
+                {t('RestoreAccess')}
               </Link>
             </div>
           </form>

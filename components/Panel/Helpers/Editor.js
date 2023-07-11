@@ -2,12 +2,16 @@ import { useEffect, useState } from 'react'
 
 import { useTranslation } from 'next-i18next'
 
+import { toast, Toaster } from 'react-hot-toast'
+
 import AutoSizeTextArea from '../UI/AutoSizeTextArea'
 
-import { supabase } from 'utils/supabaseClient'
+import useSupabaseClient from 'utils/supabaseClient'
 import { obsCheckAdditionalVerses } from 'utils/helper'
 
 function Editor({ config }) {
+  const supabase = useSupabaseClient()
+
   const { t } = useTranslation(['common'])
 
   const [verseObjects, setVerseObjects] = useState([])
@@ -19,9 +23,16 @@ function Editor({ config }) {
   const updateVerse = (id, text) => {
     setVerseObjects((prev) => {
       prev[id].verse = text
-      // мы можем сохранять каждый стих отдельно, когда теряется фокус
       const saveInDB = async () => {
-        await supabase.rpc('save_verses', { verses: { [prev[id].verse_id]: text } })
+        const res = await supabase.rpc('save_verses', {
+          verses: { [prev[id].verse_id]: text },
+        })
+        if (res.error || !res) {
+          toast.error(t('SaveFailed') + '. ' + t('PleaseCheckInternetConnection'), {
+            duration: 8000,
+          })
+          console.log(res)
+        }
       }
       saveInDB()
       return [...prev]
@@ -41,6 +52,7 @@ function Editor({ config }) {
         </div>
       ))}
       <div className="select-none">ㅤ</div>
+      <Toaster />
     </div>
   )
 }

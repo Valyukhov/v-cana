@@ -1,0 +1,22 @@
+{
+  "back_obs": "Contraportada",
+  "back_placeholder_obs": "### Aquí necesitas texto en formato markdown para la contraportada del libro",
+  "title_obs": "Título",
+  "title_placeholder_obs": "Historias abiertas de la Biblia",
+  "chapter_label_obs": "El nombre de las historias",
+  "chapter_label_placeholder_obs": "Historia",
+  "intro_obs": "Intro",
+  "intro_placeholder_obs": "Aquí necesitas un texto en formato markdown para describir el libro",
+  "h": "Título del libro",
+  "h_placeholder": "3 Juanes",
+  "toc1": "Título completo del libro",
+  "toc1_placeholder": "Tercera carta de Juan",
+  "toc2": "Título abreviado del libro",
+  "toc2_placeholder": "3 Juanes",
+  "toc3": "Título abreviado",
+  "toc3_placeholder": "3Jn",
+  "mt": "Título principal del libro",
+  "mt_placeholder": "3 Juanes",
+  "chapter_label": "Nombre de los capítulos",
+  "chapter_label_placeholder": "Capítulo"
+}

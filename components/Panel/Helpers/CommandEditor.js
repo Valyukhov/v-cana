@@ -3,9 +3,12 @@ import { useEffect, useState } from 'react'
 import { useRouter } from 'next/router'
 
 import axios from 'axios'
-import { useTranslation } from 'next-i18next'
 
-import { supabase } from 'utils/supabaseClient'
+import { useTranslation } from 'react-i18next'
+
+import { toast, Toaster } from 'react-hot-toast'
+
+import useSupabaseClient from 'utils/supabaseClient'
 
 import AutoSizeTextArea from '../UI/AutoSizeTextArea'
 
@@ -18,12 +21,14 @@ import { obsCheckAdditionalVerses } from 'utils/helper'
 //              - FALSE видно все стихи, исправлять можно только свои
 
 function CommandEditor({ config }) {
+  const supabase = useSupabaseClient()
+
   const { user } = useCurrentUser()
+  const { t } = useTranslation(['common'])
 
   const {
     query: { project, book, chapter: chapter_num },
   } = useRouter()
-  const { t } = useTranslation(['common'])
 
   const [level, setLevel] = useState('user')
   const [verseObjects, setVerseObjects] = useState([])
@@ -46,7 +51,7 @@ function CommandEditor({ config }) {
     if (currentProject?.id && user?.id) {
       getLevel(user.id, currentProject.id)
     }
-  }, [currentProject?.id, user?.id])
+  }, [currentProject?.id, supabase, user?.id])
 
   useEffect(() => {
     supabase
@@ -65,7 +70,7 @@ function CommandEditor({ config }) {
         }))
         setVerseObjects(result)
       })
-  }, [book, chapter_num, config?.reference?.verses, project])
+  }, [book, chapter_num, config?.reference?.verses, project, supabase])
 
   const updateVerseObject = (id, text) => {
     setVerseObjects((prev) => {
@@ -83,19 +88,27 @@ function CommandEditor({ config }) {
     let mySubscription = null
     if (chapter?.id) {
       mySubscription = supabase
-        .from('verses:chapter_id=eq.' + chapter.id)
-        .on('UPDATE', (payload) => {
-          const { id, text } = payload.new
-          updateVerseObject(id, text)
-        })
+        .channel('public' + 'verses:chapter_id=eq.' + chapter.id)
+        .on(
+          'postgres_changes',
+          {
+            event: 'UPDATE',
+            schema: 'public',
+            table: 'verses:chapter_id=eq.' + chapter.id,
+          },
+          (payload) => {
+            const { id, text } = payload.new
+            updateVerseObject(id, text)
+          }
+        )
         .subscribe()
     }
     return () => {
       if (mySubscription) {
-        supabase.removeSubscription(mySubscription)
+        supabase.removeChannel(mySubscription)
       }
     }
-  }, [chapter?.id])
+  }, [chapter?.id, supabase])
 
   const updateVerse = (id, text) => {
     setVerseObjects((prev) => {
@@ -110,10 +123,13 @@ function CommandEditor({ config }) {
       axios.defaults.headers.common['token'] = user?.access_token
       axios
         .put(`/api/save_verse`, { id: prev[id].verse_id, text })
-        .then((res) => {
-          console.log('save_verse', res)
+        .then()
+        .catch((error) => {
+          toast.error(t('SaveFailed') + '. ' + t('PleaseCheckInternetConnection'), {
+            duration: 8000,
+          })
+          console.log(error)
         })
-        .catch(console.log)
       return [...prev]
     })
   }
@@ -129,8 +145,8 @@ function CommandEditor({ config }) {
                   ? ['user', 'translator'].includes(level)
                   : !verseObject.editable
               )
-                ? 'text-blue-600'
-                : 'font-bold'
+                ? 'font-bold'
+                : 'text-blue-600'
             }
           >
             {obsCheckAdditionalVerses(verseObject.num)}
@@ -148,6 +164,7 @@ function CommandEditor({ config }) {
         </div>
       ))}
       <div className="select-none">ㅤ</div>
+      <Toaster />
     </div>
   )
 }

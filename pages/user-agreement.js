@@ -5,9 +5,11 @@ import { serverSideTranslations } from 'next-i18next/serverSideTranslations'
 
 import Footer from 'components/Footer'
 
-import { supabase } from 'utils/supabaseClient'
+import useSupabaseClient from 'utils/supabaseClient'
 
 export default function UserAgreement() {
+  const supabase = useSupabaseClient()
+
   const router = useRouter()
   const { t } = useTranslation(['user-agreement', 'common', 'users'])
   const handleClick = async () => {
@@ -25,7 +27,7 @@ export default function UserAgreement() {
         className="text-alignment text-justify overflow-auto text-gray-800"
         style={{ height: 'calc(100vh - 11rem)' }}
       >
-        <h1 className="h1 pt-4">{t('users:Agreement')}:</h1>
+        <h1 className="pt-4 text-4xl">{t('users:Agreement')}:</h1>
         <div className="mt-7">
           <b className="font-bold">{t('License')}</b>
           <p
