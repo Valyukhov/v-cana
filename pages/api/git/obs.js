@@ -73,9 +73,12 @@ export default async function obsHandler(req, res) {
   if (typeof verses === 'string') {
     verses = verses.split(',').map((el) => el.trim())
   }
-  const url = `https://git.door43.org/${owner}/${repo}/raw/commit/${commit}${bookPath.slice(
-    1
-  )}/${String(chapter).padStart(2, '0')}.md`
+  const url = `${
+    process.env.NEXT_PUBLIC_NODE_HOST ?? 'https://git.door43.org'
+  }/${owner}/${repo}/raw/commit/${commit}${bookPath.slice(1)}/${String(chapter).padStart(
+    2,
+    '0'
+  )}.md`
   try {
     const _data = await axios.get(url)
     const jsonData = mdToJson(_data.data)
@@ -91,10 +94,8 @@ export default async function obsHandler(req, res) {
           })
         : verseObjectsObs
 
-    res.status(200).json({ verseObjects: _verseObjects, header })
-    return
+    return res.status(200).json({ verseObjects: _verseObjects, header })
   } catch (error) {
-    res.status(404).json({ error })
-    return
+    return res.status(404).json({ error })
   }
 }

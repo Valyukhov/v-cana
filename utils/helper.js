@@ -37,13 +37,17 @@ export const checkLSVal = (el, val, type = 'string', ext = false) => {
 }
 
 export const readableDate = (date, locale = 'ru') => {
-  return new Date(date).toLocaleString(locale, {})
+  return new Intl.DateTimeFormat(locale, {
+    year: '2-digit',
+    month: 'numeric',
+    day: 'numeric',
+  }).format(new Date(date))
 }
 
 const compileMarkdown = async (ref) => {
   const title = ref.json[0] ? `# ${ref.json[0]}\n\n` : ''
   const reference = ref.json[200] ? `_${ref.json[200]}_` : ''
-  const markdown = ''
+  let markdown = ''
   for (const key in ref.json) {
     if (Object.hasOwnProperty.call(ref.json, key)) {
       if (ref.json[key] && !['0', '200'].includes(key)) {
@@ -64,7 +68,7 @@ export const compilePdfObs = async (ref, downloadSettings) => {
   const reference = ref.json[200]
     ? `<p class="break"><em> ${ref.json[200]} </em></p>`
     : ''
-  const frames = ''
+  let frames = ''
   for (const key in ref.json) {
     if (Object.hasOwnProperty.call(ref.json, key)) {
       if (ref.json[key] && !['0', '200'].includes(key)) {
@@ -104,7 +108,7 @@ export const compileChapter = async (ref, type = 'txt', downloadSettings) => {
         break
     }
   }
-  const front = ''
+  let front = ''
   if (downloadSettings?.withFront) {
     front = `<div class="break" style="text-align: center"><h1>${ref?.project?.title}</h1><h1>${ref?.book?.properties?.scripture?.toc1}</h1></div>`
   }
@@ -145,14 +149,14 @@ export const downloadPdf = ({ htmlContent, projectLanguage, fileName }) => {
   new_window?.document.write(`<html lang="${projectLanguage?.code}">
   <head>
       <meta charset="UTF-8"/>
-      <title>${fileName}</title> 
+      <title>${fileName}</title>
       <style type="text/css">
         .break {
             page-break-after: always;
         }
-    </style>     
+    </style>
   </head>
-  <body onLoad="window.print()">      
+  <body onLoad="window.print()">
       ${htmlContent}
       </body>
       </html>`)
@@ -449,4 +453,45 @@ export const obsCheckAdditionalVerses = (numVerse) => {
   }
 
   return String(numVerse)
+}
+
+export function filterNotes(newNote, verse, notes) {
+  if (Array.isArray(verse)) {
+    verse.forEach((el) => {
+      if (!notes[el]) {
+        notes[el] = [newNote]
+      } else {
+        notes[el].push(newNote)
+      }
+    })
+  } else {
+    if (!notes[verse]) {
+      notes[verse] = [newNote]
+    } else {
+      notes[verse].push(newNote)
+    }
+  }
+}
+
+export const getWords = async ({ zip, repo, wordObjects }) => {
+  if (!zip || !repo || !wordObjects) {
+    return []
+  }
+
+  const promises = wordObjects.map(async (wordObject) => {
+    const uriMd = repo + '/' + wordObject.TWLink.split('/').slice(-3).join('/') + '.md'
+
+    try {
+      const markdown = await zip.files[uriMd].async('string')
+      const splitter = markdown?.search('\n')
+      return {
+        ...wordObject,
+        title: markdown?.slice(0, splitter),
+        text: markdown?.slice(splitter),
+      }
+    } catch (error) {
+      return null
+    }
+  })
+  return await Promise.all(promises)
 }

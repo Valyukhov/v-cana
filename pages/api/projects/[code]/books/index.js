@@ -1,10 +1,10 @@
-import { supabase } from 'utils/supabaseClient'
+import { createPagesServerClient } from '@supabase/auth-helpers-nextjs'
 
 export default async function booksHandler(req, res) {
-  if (!req.headers.token) {
-    res.status(401).json({ error: 'Access denied!' })
+  if (!req?.headers?.token) {
+    return res.status(401).json({ error: 'Access denied!' })
   }
-  supabase.auth.setAuth(req.headers.token)
+  const supabase = createPagesServerClient({ req, res })
 
   let data = {}
   const {
@@ -16,19 +16,17 @@ export default async function booksHandler(req, res) {
       try {
         const { data: books, error } = await supabase
           .from('books')
-          .select('id, projects!inner(code), code, chapters, properties')
+          .select('id, projects!inner(code), code, chapters, properties, level_checks')
           .eq('projects.code', code)
 
         if (error) throw error
         data = books
       } catch (error) {
-        res.status(404).json({ error })
-        return
+        return res.status(404).json({ error })
       }
-      res.status(200).json(data)
-      break
+      return res.status(200).json(data)
     default:
       res.setHeader('Allow', ['GET'])
-      res.status(405).end(`Method ${method} Not Allowed`)
+      return res.status(405).end(`Method ${method} Not Allowed`)
   }
 }

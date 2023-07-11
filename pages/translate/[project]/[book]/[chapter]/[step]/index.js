@@ -10,16 +10,24 @@ import { useSetRecoilState } from 'recoil'
 
 import Footer from 'components/Footer'
 import Workspace from 'components/Workspace'
+import Modal from 'components/Modal'
 
 import { useCurrentUser } from 'lib/UserContext'
 import { supabaseService } from 'utils/supabaseServer'
-import { supabase } from 'utils/supabaseClient'
-import { projectIdState, stepConfigState } from 'components/Panel/state/atoms'
+import useSupabaseClient from 'utils/supabaseClient'
+import {
+  projectIdState,
+  stepConfigState,
+  currentVerse,
+} from 'components/Panel/state/atoms'
 
 export default function ProgressPage({ last_step }) {
+  const supabase = useSupabaseClient()
   const { user } = useCurrentUser()
   const setStepConfigData = useSetRecoilState(stepConfigState)
-  const { t } = useTranslation(['common'])
+  const setCurrentVerse = useSetRecoilState(currentVerse)
+
+  const { t } = useTranslation('common')
   const {
     query: { project, book, chapter, step },
     replace,
@@ -28,6 +36,7 @@ export default function ProgressPage({ last_step }) {
   const setProjectId = useSetRecoilState(projectIdState)
   const [versesRange, setVersesRange] = useState([])
   const [loading, setLoading] = useState(false)
+  const [isOpenModal, setIsOpenModal] = useState(false)
 
   useEffect(() => {
     if (user?.login) {
@@ -41,7 +50,7 @@ export default function ProgressPage({ last_step }) {
           setVersesRange(res.data.filter((el) => el.translator === user.login))
         })
     }
-  }, [book, chapter, project, user?.login])
+  }, [book, chapter, project, supabase, user?.login])
 
   useEffect(() => {
     supabase
@@ -100,7 +109,8 @@ export default function ProgressPage({ last_step }) {
       chapter,
       current_step: step,
     })
-    localStorage.setItem('scrollIds', JSON.stringify({}))
+    localStorage.setItem('highlightIds', JSON.stringify({}))
+    setCurrentVerse('1')
     if (parseInt(step) === parseInt(next_step)) {
       replace(`/account`)
     } else {
@@ -127,9 +137,29 @@ export default function ProgressPage({ last_step }) {
       <Footer
         textButton={t('Next')}
         textCheckbox={t('Done')}
-        handleClick={handleNextStep}
+        handleClick={() => setIsOpenModal(true)}
         loading={loading}
       />
+      <Modal isOpen={isOpenModal} closeHandle={() => setIsOpenModal(false)}>
+        <div className="flex flex-col gap-7 justify-center items-center">
+          <div className="flex flex-row gap-2 text-2xl text-center">
+            <p>{t('AreYouSureGoToNextStep')}</p>
+          </div>
+
+          <div className="flex justify-center self-center gap-7 w-1/2">
+            <button className="btn-secondary flex-1" onClick={handleNextStep}>
+              {t('Yes')}
+            </button>
+
+            <button
+              className="btn-secondary flex-1"
+              onClick={() => setIsOpenModal(false)}
+            >
+              {t('No')}
+            </button>
+          </div>
+        </div>
+      </Modal>
     </div>
   )
 }
