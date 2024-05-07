@@ -6,19 +6,22 @@ on:
 
 jobs:
   test:
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-latest
+
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
 
       - uses: supabase/setup-cli@v1
+        with:
+          version: latest
 
       - name: Start Supabase local development setup
         run: supabase start
 
-      - name: Verify generated types are up-to-date
+      - name: Verify generated types are checked in
         run: |
-          supabase gen types typescript --local > types.ts
-          if [ "$(git diff --ignore-space-at-eol types.ts | wc -l)" -gt "0" ]; then
+          supabase gen types typescript --local > types.gen.ts
+          if ! git diff --ignore-space-at-eol --exit-code --quiet types.gen.ts; then
             echo "Detected uncommitted changes after build. See status below:"
             git diff
             exit 1
