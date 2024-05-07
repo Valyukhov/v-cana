@@ -1,10 +1,17 @@
 import axios from 'axios'
 import usfm from 'usfm-js'
 import jsyaml from 'js-yaml'
+
+import { JsonToPdf } from '@texttree/obs-format-convert-rcl'
+
 import { obsStoryVerses } from './config'
+const isServer = typeof window === 'undefined'
 
 export const checkLSVal = (el, val, type = 'string', ext = false) => {
   let value
+  if (isServer) {
+    return val
+  }
   switch (type) {
     case 'object':
       try {
@@ -44,88 +51,71 @@ export const readableDate = (date, locale = 'ru') => {
   }).format(new Date(date))
 }
 
-const compileMarkdown = async (ref) => {
-  const title = ref.json[0] ? `# ${ref.json[0]}\n\n` : ''
-  const reference = ref.json[200] ? `_${ref.json[200]}_` : ''
-  let markdown = ''
-  for (const key in ref.json) {
-    if (Object.hasOwnProperty.call(ref.json, key)) {
-      if (ref.json[key] && !['0', '200'].includes(key)) {
-        const image = `![OBS Image](https://cdn.door43.org/obs/jpg/360px/obs-en-${String(
-          ref.chapterNum
-        ).padStart(2, '0')}-${String(key).padStart(2, '0')}.jpg)\n\n`
-
-        const verse = ref.json[key]
-        markdown += image + verse + '\n\n'
-      }
-    }
-  }
-  return title + markdown + reference
-}
-
-export const compilePdfObs = async (ref, downloadSettings) => {
-  const title = ref.json[0] ? `<h1>${ref.json[0]}</h1>` : ''
-  const reference = ref.json[200]
-    ? `<p class="break"><em> ${ref.json[200]} </em></p>`
-    : ''
-  let frames = ''
-  for (const key in ref.json) {
-    if (Object.hasOwnProperty.call(ref.json, key)) {
-      if (ref.json[key] && !['0', '200'].includes(key)) {
-        const image = downloadSettings.withImages
-          ? `<p><img alt="OBS Image"src="https://cdn.door43.org/obs/jpg/360px/obs-en-${String(
-              ref.chapterNum
-            ).padStart(2, '0')}-${String(key).padStart(2, '0')}.jpg"/></p>`
-          : ''
-        const verse = `<p>${ref.json[key]}</p>`
-        frames += `<div>${image}${verse}</div>`
-      }
-    }
+export const createObjectToTransform = (ref, partOfChapterTitle) => {
+  if (ref.json === null) {
+    return
   }
 
-  return title + frames + reference
+  const { chapterNum, json } = ref
+  const objectToTransform = {
+    verseObjects: [],
+    title: `${chapterNum}.`,
+    reference: ' ', // PDF Bible does not work without reference
+  }
+
+  if (json[0] && json[200]) {
+    objectToTransform.title = `${chapterNum}. ${json[0]}`
+    objectToTransform.reference = json[200]
+
+    for (const [key, value] of Object.entries(json)) {
+      if (key !== '0' && key !== '200') {
+        const verseObject = {
+          path: `obs-en-${String(chapterNum).padStart(2, '0')}-${String(key).padStart(
+            2,
+            '0'
+          )}.jpg`,
+          text: value,
+        }
+        objectToTransform.verseObjects.push(verseObject)
+      }
+    }
+  } else {
+    objectToTransform.title = `${partOfChapterTitle} ${chapterNum}`
+
+    for (const [key, value] of Object.entries(json)) {
+      const verseObject = {
+        text: value,
+        verse: key,
+      }
+      objectToTransform.verseObjects.push(verseObject)
+    }
+  }
+  return objectToTransform
 }
 
-export const compileChapter = async (ref, type = 'txt', downloadSettings) => {
+export const compileChapter = (ref, withFront, type = 'txt') => {
   if (!ref?.json) {
     return
   }
-  if (['markdown', 'pdf-obs'].includes(type)) {
-    switch (type) {
-      case 'markdown':
-        return await compileMarkdown(ref)
-      case 'pdf-obs':
-        if (downloadSettings?.withFront) {
-          const title = ref?.book?.properties?.obs?.title
-            ? `<h1>${ref?.book?.properties?.obs?.title}</h1>`
-            : ''
-          const front = `<div class="break" style="text-align: center"><h1>${ref?.project?.title}</h1>${title}</div>`
-          return front + (await compilePdfObs(ref, downloadSettings))
-        } else {
-          return await compilePdfObs(ref, downloadSettings)
-        }
-      default:
-        break
-    }
-  }
   let front = ''
-  if (downloadSettings?.withFront) {
+  if (withFront) {
     front = `<div class="break" style="text-align: center"><h1>${ref?.project?.title}</h1><h1>${ref?.book?.properties?.scripture?.toc1}</h1></div>`
   }
+
   if (Object.keys(ref.json).length > 0) {
     const text = Object.entries(ref.json).reduce(
-      (summary, verse) => {
-        if (type === 'txt') {
-          return summary + `${verse[0]}. ${verse[1] || ''}\n`
-        } else {
-          return summary + `<sup>${verse[0]}</sup> ${verse[1] || ''} `
-        }
+      (summary, [key, value]) => {
+        const verseText =
+          type === 'txt'
+            ? `${key}. ${value || ''}\n`
+            : `<sup>${key}</sup> ${value || ''} `
+        return summary + verseText
       },
       type === 'txt'
-        ? ref?.title + '\n'
-        : front +
-            `<h1>${ref?.book?.properties?.scripture?.chapter_label} ${ref.chapterNum}</h1>`
+        ? `${ref.title}\n`
+        : `${front}<h1>${ref.book.properties.scripture.chapter_label} ${ref.chapterNum}</h1>`
     )
+
     return text
   }
 }
@@ -141,26 +131,182 @@ export const downloadFile = ({ text, title, type = 'text/plain' }) => {
   element.click()
 }
 
-export const downloadPdf = ({ htmlContent, projectLanguage, fileName }) => {
-  if (!htmlContent) {
-    return
+export const downloadPdf = async ({
+  t,
+  book,
+  title,
+  chapter,
+  chapters,
+  fileName,
+  projectTitle,
+  projectLanguage,
+  downloadSettings,
+  obs = false,
+}) => {
+  const commonStyles = {
+    titlePageTitle: { alignment: 'center', fontSize: 32, bold: true, margin: [73, 20] },
+    SubtitlePageTitle: {
+      alignment: 'center',
+      fontSize: 20,
+      bold: true,
+      margin: [73, 0, 73, 20],
+    },
+    chapterTitle: { fontSize: 20, bold: true, margin: [0, 26, 0, 15] },
+    currentPage: { alignment: 'center', fontSize: 16, bold: true, margin: [0, 10, 0, 0] },
+    projectLanguage: { alignment: 'center', bold: true, margin: [73, 15, 73, 0] },
+    copyright: { alignment: 'center', margin: [0, 10, 0, 0] },
+    defaultPageHeader: { bold: true, width: '50%' },
+    text: {
+      alignment: 'justify',
+    },
   }
-  let new_window = window.open()
-  new_window?.document.write(`<html lang="${projectLanguage?.code}">
-  <head>
-      <meta charset="UTF-8"/>
-      <title>${fileName}</title>
-      <style type="text/css">
-        .break {
-            page-break-after: always;
+
+  const obsStyles = {
+    image: {
+      alignment: 'center',
+      margin: [0, 15],
+    },
+    reference: {
+      margin: [0, 10, 0, 0],
+      italics: true,
+    },
+    tableOfContentsTitle: { alignment: 'center', margin: [0, 0, 0, 20] },
+    back: { alignment: 'center' },
+  }
+
+  const bibleStyles = {
+    chapterTitle: { fontSize: 32, bold: true },
+    verseNumber: {
+      sup: true,
+      bold: true,
+      opacity: 0.8,
+    },
+  }
+  const styles = obs
+    ? { ...commonStyles, ...obsStyles }
+    : { ...commonStyles, ...bibleStyles }
+
+  let pdfOptions
+
+  const createPdfOptionsObs = (chapters, downloadSettings, book) => {
+    if (!fileName.endsWith('.pdf')) {
+      fileName += '.pdf'
+    }
+    pdfOptions = {
+      styles,
+      fileName,
+      data: [],
+      showChapterTitlePage: false,
+      bookPropertiesObs: {
+        SubtitlePageTitle: title,
+        back: ' ', // to display the page headers
+      },
+      imageUrl: `${
+        process.env.NEXT_PUBLIC_INTRANET
+          ? process.env.NEXT_PUBLIC_NODE_HOST
+          : 'https://cdn.door43.org'
+      }/obs/jpg/360px/`,
+    }
+
+    if (downloadSettings?.withFront) {
+      pdfOptions.bookPropertiesObs = {
+        ...pdfOptions.bookPropertiesObs,
+        titlePageTitle: projectTitle,
+        copyright: 'TextTree Movement®',
+        projectLanguage,
+      }
+    }
+
+    if (downloadSettings?.withImages === false) {
+      pdfOptions.showImages = false
+    }
+
+    if (book) {
+      pdfOptions.data = chapters
+        .filter((chapter) => chapter.text !== null)
+        .map((chapter) =>
+          createObjectToTransform({
+            json: chapter.text,
+            chapterNum: chapter.num,
+          })
+        )
+
+      if (downloadSettings?.withIntro) {
+        pdfOptions.bookPropertiesObs = {
+          ...pdfOptions.bookPropertiesObs,
+          intro: book.properties.obs.intro,
+          tableOfContentsTitle: t('TableOfContents'),
         }
-    </style>
-  </head>
-  <body onLoad="window.print()">
-      ${htmlContent}
-      </body>
-      </html>`)
-  new_window?.document.close()
+      }
+
+      if (downloadSettings?.withBack) {
+        pdfOptions.bookPropertiesObs = {
+          ...pdfOptions.bookPropertiesObs,
+          back: book.properties.obs.back,
+        }
+      }
+    } else {
+      pdfOptions.data = [createObjectToTransform(chapter)]
+    }
+
+    return pdfOptions
+  }
+
+  const createPdfOptionsBible = (chapters, downloadSettings, book) => {
+    const partOfChapterTitle = t('Chapter')
+    pdfOptions = {
+      styles,
+      fileName,
+      data: [],
+      showVerseNumber: true,
+      combineVerses: true,
+      showTitlePage: false,
+      showChapterTitlePage: false,
+      bookPropertiesObs: {
+        SubtitlePageTitle: title,
+        back: ' ', // to display the page headers
+      },
+    }
+
+    if (downloadSettings?.withFront) {
+      pdfOptions.bookPropertiesObs = {
+        ...pdfOptions.bookPropertiesObs,
+        titlePageTitle: projectTitle,
+        projectLanguage,
+        copyright: 'TextTree Movement®',
+      }
+    }
+
+    if (book) {
+      pdfOptions.data = chapters
+        .filter((chapter) => chapter.text !== null)
+        .map((chapter) =>
+          createObjectToTransform(
+            {
+              json: chapter.text,
+              chapterNum: chapter.num,
+            },
+            partOfChapterTitle
+          )
+        )
+    } else {
+      if (!chapter) {
+        return
+      }
+      pdfOptions.data = [createObjectToTransform(chapter, partOfChapterTitle)]
+    }
+
+    return pdfOptions
+  }
+
+  pdfOptions = obs
+    ? createPdfOptionsObs(chapters, downloadSettings, book)
+    : createPdfOptionsBible(chapters, downloadSettings, book)
+  try {
+    await JsonToPdf(pdfOptions)
+  } catch (error) {
+    console.error('Error generating PDF:', error)
+  }
 }
 
 export const convertToUsfm = ({ jsonChapters, book, project }) => {
@@ -246,10 +392,18 @@ export const convertToUsfm = ({ jsonChapters, book, project }) => {
 
 export const parseManifests = async ({ resources, current_method }) => {
   let baseResource = {}
-  const promises = Object.keys(resources).map(async (el) => {
-    const url = resources[el].replace('/src/', '/raw/') + '/manifest.yaml'
-    const { data } = await axios.get(url)
 
+  const getBaseResourceUrl = (urlArray) =>
+    `${process.env.NODE_HOST ?? 'https://git.door43.org'}/${urlArray[1]}/${
+      urlArray[2]
+    }/raw/commit/${urlArray[4]}`
+
+  const promises = Object.keys(resources).map(async (el) => {
+    const { pathname } = new URL(resources[el])
+    const urlArray = pathname.split('/')
+    const url = getBaseResourceUrl(urlArray)
+    const manifestUrl = getBaseResourceUrl(urlArray) + '/manifest.yaml'
+    const { data } = await axios.get(manifestUrl)
     const manifest = jsyaml.load(data, { json: true })
 
     if (current_method.resources[el]) {
@@ -257,7 +411,7 @@ export const parseManifests = async ({ resources, current_method }) => {
     }
     return {
       resource: el,
-      url: resources[el],
+      url,
       manifest,
     }
   })
@@ -266,7 +420,8 @@ export const parseManifests = async ({ resources, current_method }) => {
 
   let newResources = {}
   manifests.forEach((el) => {
-    const url = el.url.split('://')[1].split('/')
+    const { pathname } = new URL(el.url)
+    const url = pathname.split('/')
     newResources[el.resource] = {
       owner: url[1],
       repo: url[2],
@@ -274,10 +429,16 @@ export const parseManifests = async ({ resources, current_method }) => {
       manifest: el.manifest,
     }
   })
-  baseResource.books = baseResource.books.map((el) => ({
-    name: el.identifier,
-    link: resources[baseResource.name].replace('/src/', '/raw/') + el.path.substring(1),
-  }))
+  baseResource.books = baseResource.books.map((el) => {
+    const { pathname } = new URL(resources[baseResource.name])
+    const urlArray = pathname.split('/')
+    const url = getBaseResourceUrl(urlArray)
+
+    return {
+      name: el.identifier,
+      link: url + el.path.substring(1),
+    }
+  })
   return { baseResource, newResources }
 }
 
@@ -383,7 +544,6 @@ export const saveCacheNote = (key, note, user) => {
   const cache = JSON.parse(localStorage.getItem(key))
   if (!note?.data?.blocks?.length) {
     if (cache?.[note.id]?.length) {
-      axios.defaults.headers.common['token'] = user?.access_token
       axios
         .post(`/api/logs`, {
           message: `${key} saved empty`,
@@ -447,6 +607,10 @@ export const validateNote = (note) => {
   return true
 }
 
+export const validateTitle = (title) => {
+  return title && title.trim().length > 0
+}
+
 export const obsCheckAdditionalVerses = (numVerse) => {
   if (['0', '200'].includes(String(numVerse))) {
     return ''
@@ -472,6 +636,35 @@ export function filterNotes(newNote, verse, notes) {
     }
   }
 }
+export const validationBrief = (brief_data) => {
+  if (!brief_data) {
+    return { error: 'Properties is null or undefined' }
+  }
+  if (Array.isArray(brief_data)) {
+    const isValidKeys = brief_data.find((briefObj) => {
+      const isNotValid =
+        JSON.stringify(Object.keys(briefObj).sort()) !==
+        JSON.stringify(['block', 'id', 'resume', 'title'].sort())
+      if (isNotValid) {
+        return { error: 'brief_data is not valid', briefObj }
+      } else {
+        briefObj.block?.forEach((blockObj) => {
+          if (
+            JSON.stringify(Object.keys(blockObj).sort()) !==
+            JSON.stringify(['question', 'answer'].sort())
+          ) {
+            return { error: 'brief_data.block has different keys', blockObj }
+          }
+        })
+      }
+    })
+    if (isValidKeys) {
+      return { error: 'brief_data has different keys', isValidKeys }
+    }
+  }
+
+  return { error: null }
+}
 
 export const getWords = async ({ zip, repo, wordObjects }) => {
   if (!zip || !repo || !wordObjects) {
@@ -494,4 +687,171 @@ export const getWords = async ({ zip, repo, wordObjects }) => {
     }
   })
   return await Promise.all(promises)
+}
+
+export const stepValidation = (step) => {
+  try {
+    const obj = JSON.parse(JSON.stringify(step))
+    if (!obj || typeof obj !== 'object') {
+      throw new Error('This is incorrect json')
+    }
+    const base = ['intro', 'description', 'title', 'id', 'is_awaiting_team']
+    if (!JSON.stringify(Object.keys(step).every((element) => base.includes(element)))) {
+      throw new Error('Step has different keys')
+    }
+  } catch (error) {
+    return { error }
+  }
+  return { error: null }
+}
+
+export const stepsValidation = (steps) => {
+  if (!steps?.length) {
+    return { error: 'This is incorrect json', steps }
+  }
+  for (const step of steps) {
+    try {
+      const { error } = stepValidation(step)
+      if (error) throw error
+    } catch (error) {
+      return { error }
+    }
+  }
+  return { error: null }
+}
+
+export const convertNotesToTree = (notes, parentId = null) => {
+  const filteredNotes = notes?.filter((note) => note.parent_id === parentId)
+
+  filteredNotes?.sort((a, b) => a.sorting - b.sorting)
+  return filteredNotes?.map((note) => ({
+    id: note.id,
+    name: note.title,
+    ...(note.is_folder && {
+      children: convertNotesToTree(notes, note.id),
+    }),
+  }))
+}
+
+export function checkBookCodeExists(bookCode, data) {
+  return Array.isArray(data) && data.some((book) => book.book_code === bookCode)
+}
+
+export function checkChapterVersesExist(bookCode, chapterNumber, data) {
+  if (!data) {
+    return false
+  }
+
+  return data.some(
+    (book) =>
+      book.book_code === bookCode &&
+      book.chapters &&
+      book.chapters[chapterNumber] &&
+      book.chapters[chapterNumber].verseObjects.length > 0
+  )
+}
+
+export function getVerseObjectsForBookAndChapter(chapters, bookCode, chapterNumber) {
+  if (chapters && Array.isArray(chapters)) {
+    const chapterData = chapters.find(
+      (chapter) => chapter.book_code === bookCode && chapter.level_check === null
+    )
+
+    if (chapterData) {
+      return chapterData.chapters[chapterNumber]
+    }
+  }
+
+  return []
+}
+
+export function getVerseCount(books, bookCode, chapterNumber) {
+  for (let i = 0; i < books?.length; i++) {
+    if (books[i].code === bookCode) {
+      const chapters = books[i].chapters
+      if (chapters.hasOwnProperty(chapterNumber)) {
+        return chapters[chapterNumber]
+      }
+    }
+  }
+  return null
+}
+
+export function getVerseCountOBS(chaptersData, chapterNumber) {
+  const chapterData = chaptersData?.[0].chapters
+  if (!chapterData) {
+    return
+  }
+
+  chapterNumber = chapterNumber < 10 ? `0${chapterNumber}` : `${chapterNumber}`
+  return chapterNumber in chapterData ? chapterData[chapterNumber] : 0
+}
+
+function buildTree(items) {
+  if (!items) {
+    return
+  }
+
+  const tree = []
+  const itemMap = {}
+
+  items.forEach((item) => {
+    item.children = []
+    itemMap[item.id] = item
+  })
+
+  items.forEach((item) => {
+    if (item?.parent_id) {
+      const parentItem = itemMap[item.parent_id]
+      if (parentItem) {
+        parentItem.children.push(item)
+      } else {
+        console.error(
+          `Parent item with id ${item.parent_id} not found for item with id ${item.id}`
+        )
+      }
+    } else {
+      tree.push(item)
+    }
+  })
+
+  return tree
+}
+
+function removeIdsFromTree(tree) {
+  function removeIdsFromItem(item) {
+    delete item.id
+    delete item.parent_id
+    delete item?.user_id
+    delete item?.project_id
+
+    item?.data?.blocks?.forEach((block) => delete block.id)
+    item.children.forEach((child) => removeIdsFromItem(child))
+  }
+
+  if (!tree) {
+    return
+  }
+
+  tree.forEach((item) => removeIdsFromItem(item))
+
+  return tree
+}
+
+export function formationJSONToTree(data) {
+  const treeData = buildTree(data)
+  const transformedData = removeIdsFromTree(treeData)
+
+  return transformedData
+}
+
+export const getBriefName = (briefName, defautlName) => {
+  if (!defautlName) {
+    return 'Brief'
+  }
+  if (!briefName || briefName === 'Brief') {
+    return defautlName
+  } else {
+    return briefName
+  }
 }

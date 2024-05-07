@@ -26,8 +26,13 @@
     DROP TRIGGER IF EXISTS on_public_verses_next_step ON PUBLIC.verses;
     DROP TRIGGER IF EXISTS on_public_personal_notes_update ON PUBLIC.personal_notes;
     DROP TRIGGER IF EXISTS on_public_team_notes_update ON PUBLIC.team_notes;
-    DROP TRIGGER IF EXISTS on_dictionaries_update ON PUBLIC.dictionaries;
+    DROP TRIGGER IF EXISTS alphabet_change_trigger ON PUBLIC.dictionaries;
+    DROP TRIGGER IF EXISTS alphabet_insert_trigger ON PUBLIC.dictionaries;
     DROP TRIGGER IF EXISTS on_public_chapters_update ON PUBLIC.chapters;
+    DROP TRIGGER IF EXISTS before_insert_set_sorting_personal_notes ON PUBLIC.personal_notes;
+    DROP TRIGGER IF EXISTS before_insert_set_sorting_team_notes ON PUBLIC.team_notes;
+    DROP TRIGGER IF EXISTS sorting_correction_on_deletion_personal_notes ON PUBLIC.personal_notes;
+    DROP TRIGGER IF EXISTS sorting_correction_on_deletion_team_notes ON PUBLIC.team_notes;
 
   -- END DROP TRIGGER
 
@@ -57,13 +62,28 @@
     DROP FUNCTION IF EXISTS PUBLIC.get_whole_chapter;
     DROP FUNCTION IF EXISTS PUBLIC.change_finish_chapter;
     DROP FUNCTION IF EXISTS PUBLIC.change_start_chapter;
-    DROP FUNCTION IF EXISTS PUBLIC.handle_update_dictionaries;
+    DROP FUNCTION IF EXISTS PUBLIC.alphabet_change_handler;
+    DROP FUNCTION IF EXISTS PUBLIC.alphabet_insert_handler;
     DROP FUNCTION IF EXISTS PUBLIC.handle_compile_chapter;
     DROP FUNCTION IF EXISTS PUBLIC.update_chapters_in_books;
     DROP FUNCTION IF EXISTS PUBLIC.insert_additional_chapter;
     DROP FUNCTION IF EXISTS PUBLIC.update_verses_in_chapters;
     DROP FUNCTION IF EXISTS PUBLIC.insert_additional_verses;
     DROP FUNCTION IF EXISTS PUBLIC.update_resources_in_projects;
+    DROP FUNCTION IF EXISTS PUBLIC.update_project_basic;
+    DROP FUNCTION IF EXISTS PUBLIC.update_multiple_steps;
+    DROP FUNCTION IF EXISTS PUBLIC.get_max_sorting;
+    DROP FUNCTION IF EXISTS PUBLIC.set_sorting_before_insert;
+    DROP FUNCTION IF EXISTS PUBLIC.correct_sorting_on_deletion;
+    DROP FUNCTION IF EXISTS PUBLIC.move_node;
+    DROP FUNCTION IF EXISTS PUBLIC.get_books_not_null_level_checks;
+    DROP FUNCTION IF EXISTS PUBLIC.find_books_with_chapters_and_verses;
+    DROP FUNCTION IF EXISTS PUBLIC.get_words_page;
+    DROP FUNCTION IF EXISTS PUBLIC.chapter_assign;
+    DROP FUNCTION IF EXISTS PUBLIC.save_verses_if_null;
+    DROP FUNCTION IF EXISTS PUBLIC.get_is_await_team;
+
+
 
   -- END DROP FUNCTION
 
@@ -96,8 +116,227 @@
 -- END CREATE CUSTOM TYPE
 
 -- CREATE FUNCTION
+
+CREATE FUNCTION PUBLIC.get_is_await_team(
+  project_code TEXT, 
+  chapter_num INT2, 
+  book_code PUBLIC.book_code,
+  step INT8
+) 
+
+RETURNS BOOLEAN
+LANGUAGE plpgsql SECURITY DEFINER AS $$
+DECLARE
+
+  cur_chapter_id BIGINT;
+  cur_project_id BIGINT;
+  is_awaiting_team_var BOOLEAN;
+
+BEGIN
+
+  SELECT projects.id INTO cur_project_id
+  FROM PUBLIC.projects
+  WHERE code = project_code;
+
+  IF cur_project_id IS NULL THEN
+    RETURN FALSE;
+  END IF;
+
+  IF authorize(auth.uid(), cur_project_id) = 'user' THEN
+    RETURN FALSE;
+  END IF;
+
+  SELECT chapters.id INTO cur_chapter_id
+  FROM PUBLIC.chapters
+  LEFT JOIN PUBLIC.books ON chapters.book_id = books.id
+  WHERE num = chapter_num AND chapters.project_id = cur_project_id AND books.code = book_code;
+
+  IF cur_chapter_id IS NULL THEN
+    RETURN FALSE;
+  END IF;  
+
+ SELECT is_awaiting_team INTO is_awaiting_team_var
+    FROM steps
+    WHERE project_id = cur_project_id AND sorting = get_is_await_team.step;
+
+  IF (is_awaiting_team_var = FALSE) THEN
+    RETURN FALSE;
+  END IF;  
+
+  IF EXISTS (
+    SELECT 1
+    FROM public.verses
+    LEFT JOIN public.project_translators ON verses.project_translator_id = project_translators.id
+    LEFT JOIN public.users ON project_translators.user_id = users.id
+    LEFT JOIN public.steps ON verses.current_step = steps.id
+    WHERE verses.project_id = cur_project_id AND verses.chapter_id = cur_chapter_id 
+      AND verses.project_translator_id IS NOT NULL and steps.sorting < get_is_await_team.step
+  ) THEN RETURN TRUE;
+  ELSE
+    RETURN FALSE;
+  END IF;
+
+END;
+$$;
+
+
+CREATE FUNCTION PUBLIC.get_whole_chapter(project_code TEXT, chapter_num INT2, book_code PUBLIC.book_code) RETURNS TABLE(verse_id BIGINT, num INT2, verse TEXT, translator TEXT)
+    LANGUAGE plpgsql SECURITY DEFINER AS $$
+    DECLARE
+      verses_list RECORD;
+      cur_chapter_id BIGINT;
+      cur_project_id BIGINT;
+    BEGIN
+
+      SELECT projects.id INTO cur_project_id
+      FROM PUBLIC.projects
+      WHERE projects.code = get_whole_chapter.project_code;
+
+      -- find out the project_id
+      IF cur_project_id IS NULL THEN
+        RETURN;
+      END IF;
+
+      -- user must be assigned to this project
+      IF authorize(auth.uid(), cur_project_id) IN ('user') THEN
+        RETURN;
+      END IF;
+
+      SELECT chapters.id INTO cur_chapter_id
+      FROM PUBLIC.chapters
+      WHERE chapters.num = get_whole_chapter.chapter_num AND chapters.project_id = cur_project_id AND chapters.book_id = (SELECT id FROM PUBLIC.books WHERE books.code = get_whole_chapter.book_code AND books.project_id = cur_project_id);
+
+      -- find out the chapter id
+      IF cur_chapter_id IS NULL THEN
+        RETURN;
+      END IF;
+
+      -- return the verse id, number, and text from a specific chapter
+      RETURN query SELECT verses.id AS verse_id, verses.num, verses.text AS verse, users.login AS translator
+      FROM public.verses LEFT OUTER JOIN public.project_translators ON (verses.project_translator_id = project_translators.id) LEFT OUTER JOIN public.users ON (project_translators.user_id = users.id)
+      WHERE verses.project_id = cur_project_id
+        AND verses.chapter_id = cur_chapter_id
+        AND verses.num < '201'
+      ORDER BY verses.num;
+
+    END;
+  $$;
+  
+--save verses if it have at least 1 null value
+CREATE FUNCTION PUBLIC.save_verses_if_null(verses JSON, project_id BIGINT) RETURNS BOOLEAN
+    LANGUAGE plpgsql SECURITY DEFINER AS $$
+    DECLARE
+    new_verses RECORD;
+    current_verse RECORD;
+    BEGIN 
+      
+      IF authorize(auth.uid(), save_verses_if_null.project_id) IN ('user') THEN RETURN FALSE;
+      END IF;
+          
+      FOR new_verses IN SELECT * FROM json_each_text(save_verses_if_null.verses)
+      LOOP
+        UPDATE
+          PUBLIC.verses
+        SET "text" = new_verses.value::TEXT
+        WHERE
+          verses.id = new_verses.key::BIGINT AND "text" IS NULL;
+      END LOOP;
+      RETURN true;
+    END;
+  $$;
+
+-- assign read-only mode for translator in specific chapter
+CREATE FUNCTION PUBLIC.chapter_assign(chapter INT, translators BIGINT[], project_id BIGINT) RETURNS BOOLEAN
+  LANGUAGE plpgsql SECURITY DEFINER AS $$
+  DECLARE
+    verse_row RECORD;
+    num_verse INT;
+    x INT;
+    
+  BEGIN
+    IF authorize(auth.uid(), chapter_assign.project_id) NOT IN ('admin', 'coordinator') THEN
+      RETURN FALSE;
+    END IF; 
+      UPDATE PUBLIC.verses 
+      SET project_translator_id = NULL WHERE verses.chapter_id = chapter AND verses.num >200;
+
+    num_verse = 201;
+    FOREACH x IN ARRAY translators LOOP
+      UPDATE PUBLIC.verses 
+      SET project_translator_id = x WHERE chapter_id = chapter AND num = num_verse;
+      num_verse = num_verse + 1;
+    END LOOP;
+    RETURN TRUE;
+  END;
+$$;
+
+-- return words from pages dict
+CREATE FUNCTION get_words_page(
+    search_query TEXT,  
+    words_per_page INT,  
+    page_number INT,  
+    project_id_param BIGINT
+  ) 
+  RETURNS TABLE (
+    dict_id TEXT,
+    dict_project_id BIGINT,
+    dict_title TEXT,
+    dict_data JSON,
+    dict_created_at TIMESTAMP,
+    dict_changed_at TIMESTAMP,
+    dict_deleted_at TIMESTAMP,
+    total_records BIGINT
+  )  
+  LANGUAGE plpgsql SECURITY DEFINER AS $$
+  DECLARE
+  from_offset INT;
+  to_offset INT;
+  BEGIN
+    IF page_number = -1 THEN
+      RETURN QUERY
+       SELECT
+        id AS dict_id,
+        project_id AS dict_project_id,
+        title AS dict_title,
+        data AS dict_data,
+        created_at AS dict_created_at,
+        changed_at AS dict_changed_at,
+        deleted_at AS dict_deleted_at,
+        COUNT(*) OVER() AS total_records
+      FROM dictionaries
+      WHERE project_id = project_id_param
+        AND deleted_at IS NULL
+        AND title ILIKE (search_query || '%')
+      ORDER BY title ASC;
+    ELSE
+      from_offset := page_number * words_per_page;
+      to_offset := (page_number + 1) * words_per_page;
+
+      RETURN QUERY
+        SELECT
+          id AS dict_id,
+          project_id AS dict_project_id,
+          title AS dict_title,
+          data AS dict_data,
+          created_at AS dict_created_at,
+          changed_at AS dict_changed_at,
+          deleted_at AS dict_deleted_at,
+          COUNT(*) OVER() AS total_records
+        FROM dictionaries
+        WHERE project_id = project_id_param
+        AND deleted_at IS NULL
+        AND title ILIKE (search_query || '%')
+        ORDER BY title ASC
+        LIMIT words_per_page
+        OFFSET from_offset;
+    END IF;
+  END 
+$$;
+
+
+
   -- function returns your maximum role on the project
-    CREATE FUNCTION PUBLIC.authorize(
+  CREATE FUNCTION PUBLIC.authorize(
         user_id uuid,
         project_id BIGINT
       ) RETURNS TEXT
@@ -138,595 +377,82 @@
       END;
     $$;
 
-  -- conditions for the user to have access to the site: 2 checkboxes and the user was not blocked
-    CREATE FUNCTION PUBLIC.has_access() RETURNS BOOLEAN
-      LANGUAGE plpgsql SECURITY DEFINER AS $$
-      DECLARE
-        access INT;
+-- getting all the books that specify the levels of checks
+CREATE FUNCTION get_books_not_null_level_checks(project_code text) 
+  RETURNS TABLE (book_code public.book_code, level_checks json) 
+  LANGUAGE plpgsql SECURITY DEFINER AS $$
+  DECLARE
+  project_id bigint;
+  BEGIN
+    SELECT id INTO project_id FROM public.projects WHERE code = project_code;
 
-      BEGIN
-        SELECT
-          COUNT(*) INTO access
+    IF project_id IS NULL THEN
+      RETURN;
+    END IF;
+
+    IF authorize(auth.uid(), project_id) NOT IN ('user', 'admin', 'coordinator', 'moderator') THEN
+     RETURN;
+    END IF;
+
+    RETURN QUERY
+     SELECT
+        b.code AS book_code,
+        b.level_checks
+      FROM
+        public.books b
+      INNER JOIN
+        public.projects p ON b.project_id = p.id
+      WHERE
+        p.code = project_code
+        AND b.level_checks IS NOT NULL;
+  END;
+$$;
+
+-- getting all books with verses that are started and non-zero translation texts
+CREATE FUNCTION find_books_with_chapters_and_verses(project_code text)
+  RETURNS TABLE (book_code public.book_code, chapter_num smallint, verse_num smallint, verse_text text)  
+  LANGUAGE plpgsql SECURITY DEFINER AS $$
+  DECLARE
+  project_id bigint;
+  BEGIN
+    SELECT id INTO project_id FROM public.projects WHERE code = project_code;
+
+    IF project_id IS NULL THEN
+      RETURN;
+    END IF;
+
+    IF authorize(auth.uid(), project_id) NOT IN ('user', 'admin', 'coordinator', 'moderator') THEN
+      RETURN;
+    END IF;
+
+    RETURN QUERY
+       SELECT
+        b.code AS book_code,
+        c.num AS chapter_num,
+        v.num AS verse_num,
+        v.text AS verse_text
         FROM
-          PUBLIC.users
+          public.books b
+        INNER JOIN
+          public.chapters c ON b.id = c.book_id
+        INNER JOIN
+          public.verses v ON c.id = v.chapter_id
+        INNER JOIN
+          public.projects p ON b.project_id = p.id
         WHERE
-          users.id = auth.uid() AND users.agreement
-          AND users.confession AND users.blocked IS NULL;
-
-        RETURN access > 0;
-
-      END;
-    $$;
-
-  -- RETURNS which step the user is currently at in a particular project
-  CREATE FUNCTION PUBLIC.get_current_steps(project_id BIGINT) RETURNS TABLE(title TEXT, project TEXT, book PUBLIC.book_code, chapter INT2, step INT2, started_at TIMESTAMP)
-    LANGUAGE plpgsql SECURITY DEFINER AS $$
-
-    BEGIN
-      -- must be on the project
-      IF authorize(auth.uid(), get_current_steps.project_id) IN ('user') THEN
-        RETURN;
-      END IF;
-
-      RETURN query SELECT steps.title, projects.code AS project, books.code AS book, chapters.num AS chapter, steps.sorting AS step, chapters.started_at
-      FROM verses
-        LEFT JOIN chapters ON (verses.chapter_id = chapters.id)
-        LEFT JOIN books ON (chapters.book_id = books.id)
-        LEFT JOIN steps ON (verses.current_step = steps.id)
-        LEFT JOIN projects ON (projects.id = verses.project_id)
-      WHERE verses.project_id = get_current_steps.project_id
-        AND chapters.started_at IS NOT NULL
-        AND chapters.finished_at IS NULL
-        AND project_translator_id = (SELECT id FROM project_translators WHERE project_translators.project_id = get_current_steps.project_id AND user_id = auth.uid())
-      GROUP BY books.id, chapters.id, verses.current_step, steps.id, projects.id;
-
-    END;
+          c.started_at IS NOT NULL
+          AND v.text IS NOT NULL
+          AND p.code = project_code;
+  END;
   $$;
 
-  -- get all the verses of the chapter
-  CREATE FUNCTION PUBLIC.get_whole_chapter(project_code TEXT, chapter_num INT2, book_code PUBLIC.book_code) RETURNS TABLE(verse_id BIGINT, num INT2, verse TEXT, translator TEXT)
-    LANGUAGE plpgsql SECURITY DEFINER AS $$
-    DECLARE
-      verses_list RECORD;
-      cur_chapter_id BIGINT;
-      cur_project_id BIGINT;
-    BEGIN
-
-      SELECT projects.id INTO cur_project_id
-      FROM PUBLIC.projects
-      WHERE projects.code = get_whole_chapter.project_code;
-
-      -- find out the project_id
-      IF cur_project_id IS NULL THEN
-        RETURN;
-      END IF;
-
-      -- user must be assigned to this project
-      IF authorize(auth.uid(), cur_project_id) IN ('user') THEN
-        RETURN;
-      END IF;
-
-      SELECT chapters.id INTO cur_chapter_id
-      FROM PUBLIC.chapters
-      WHERE chapters.num = get_whole_chapter.chapter_num AND chapters.project_id = cur_project_id AND chapters.book_id = (SELECT id FROM PUBLIC.books WHERE books.code = get_whole_chapter.book_code AND books.project_id = cur_project_id);
-
-      -- find out the chapter id
-      IF cur_chapter_id IS NULL THEN
-        RETURN;
-      END IF;
-
-      -- return the verse id, number, and text from a specific chapter
-      RETURN query SELECT verses.id AS verse_id, verses.num, verses.text AS verse, users.login AS translator
-      FROM public.verses LEFT OUTER JOIN public.project_translators ON (verses.project_translator_id = project_translators.id) LEFT OUTER JOIN public.users ON (project_translators.user_id = users.id)
-      WHERE verses.project_id = cur_project_id
-        AND verses.chapter_id = cur_chapter_id
-      ORDER BY verses.num;
-
-    END;
-  $$;
-
-  -- install a translator as a moderator. Check that there is such a thing, which is set by the admin or coordinator. Otherwise, return false. The condition that we decided to do only one moderator per project at the interface level and not the database. Leave the possibility that there are more than 1 moderators.
-  CREATE FUNCTION PUBLIC.assign_moderator(user_id uuid, project_id BIGINT) RETURNS BOOLEAN
-    LANGUAGE plpgsql SECURITY DEFINER AS $$
-    DECLARE
-      usr RECORD;
-    BEGIN
-      IF authorize(auth.uid(), assign_moderator.project_id) NOT IN ('admin', 'coordinator') THEN
-        RETURN FALSE;
-      END IF;
-      SELECT id, is_moderator INTO usr FROM PUBLIC.project_translators WHERE project_translators.project_id = assign_moderator.project_id AND project_translators.user_id = assign_moderator.user_id;
-      IF usr.id IS NULL THEN
-        RETURN FALSE;
-      END IF;
-      UPDATE PUBLIC.project_translators SET is_moderator = TRUE WHERE project_translators.id = usr.id;
-
-      RETURN TRUE;
-
-    END;
-  $$;
-
-  -- cancel the appointment of a specific moderator
-  CREATE FUNCTION PUBLIC.remove_moderator(user_id uuid, project_id BIGINT) RETURNS BOOLEAN
-    LANGUAGE plpgsql SECURITY DEFINER AS $$
-    DECLARE
-      usr RECORD;
-    BEGIN
-      IF authorize(auth.uid(), remove_moderator.project_id) NOT IN ('admin', 'coordinator') THEN
-        RETURN FALSE;
-      END IF;
-      SELECT id, is_moderator INTO usr FROM PUBLIC.project_translators WHERE project_translators.project_id = remove_moderator.project_id AND project_translators.user_id = remove_moderator.user_id;
-      IF usr.id IS NULL THEN
-        RETURN FALSE;
-      END IF;
-      UPDATE PUBLIC.project_translators SET is_moderator = FALSE WHERE project_translators.id = usr.id;
-
-      RETURN TRUE;
-
-    END;
-  $$;
-
-  -- distribution of verses among translators
-  CREATE FUNCTION PUBLIC.divide_verses(divider VARCHAR, project_id BIGINT) RETURNS BOOLEAN
-    LANGUAGE plpgsql SECURITY DEFINER AS $$
-    DECLARE
-     verse_row record;
-    BEGIN
-      IF authorize(auth.uid(), divide_verses.project_id) NOT IN ('admin', 'coordinator') THEN
-        RETURN FALSE;
-      END IF;
-
-      FOR verse_row IN SELECT * FROM jsonb_to_recordset(divider::jsonb) AS x(project_translator_id INT,id INT)
-      LOOP
-        UPDATE PUBLIC.verses SET project_translator_id = verse_row.project_translator_id WHERE verse_row.id = id;
-      END LOOP;
-
-      RETURN TRUE;
-
-    END;
-  $$;
-
-   -- Sets the start date of the translation of the chapter if it is not there or removes it if the date is already set
-  CREATE FUNCTION PUBLIC.change_start_chapter(chapter_id BIGINT,project_id BIGINT) RETURNS BOOLEAN
-    LANGUAGE plpgsql SECURITY DEFINER AS $$
-    DECLARE
-      chap RECORD;
-    BEGIN
-      IF authorize(auth.uid(), change_start_chapter.project_id) NOT IN ('admin', 'coordinator')THEN RETURN FALSE;
-      END IF;
-
-      SELECT started_at,finished_at INTO chap FROM PUBLIC.chapters WHERE change_start_chapter.chapter_id = chapters.id AND change_start_chapter.project_id = chapters.project_id;
-
-      IF chap.finished_at IS NOT NULL
-      THEN RETURN FALSE;
-      END IF;
-
-      IF chap.started_at  IS NULL THEN
-        UPDATE PUBLIC.chapters SET started_at = NOW() WHERE change_start_chapter.chapter_id = chapters.id;
-      ELSE
-        UPDATE PUBLIC.chapters SET started_at = NULL WHERE change_start_chapter.chapter_id = chapters.id;
-      END IF;
-
-      RETURN true;
-
-    END;
-  $$;
-
-   -- Sets the end date for the translation of the chapter if it is not there or removes it if the date is already set
-  CREATE FUNCTION PUBLIC.change_finish_chapter(chapter_id BIGINT,project_id BIGINT) RETURNS BOOLEAN
-    LANGUAGE plpgsql SECURITY DEFINER AS $$
-    DECLARE
-      chap RECORD;
-    BEGIN
-      IF authorize(auth.uid(), change_finish_chapter.project_id) NOT IN ('admin', 'coordinator')THEN RETURN FALSE;
-      END IF;
-
-      SELECT finished_at,started_at INTO chap FROM PUBLIC.chapters WHERE change_finish_chapter.chapter_id = chapters.id AND change_finish_chapter.project_id = chapters.project_id;
-
-      IF chap.started_at IS NULL
-      THEN RETURN FALSE;
-      END IF;
-
-      IF chap.finished_at  IS NULL THEN
-        UPDATE PUBLIC.chapters SET finished_at = NOW() WHERE change_finish_chapter.chapter_id = chapters.id;
-      ELSE
-        UPDATE PUBLIC.chapters SET finished_at = NULL WHERE change_finish_chapter.chapter_id = chapters.id;
-      END IF;
-
-      RETURN true;
-
-    END;
-  $$;
-
-   -- save the verse
-  -- I think that in general it is possible to reduce the number of requests, but let's leave it to the refactoring phase)
-  CREATE FUNCTION PUBLIC.save_verse(verse_id BIGINT, new_verse TEXT) RETURNS BOOLEAN
-    LANGUAGE plpgsql SECURITY DEFINER AS $$
-    DECLARE
-     current_verse record;
-     current_chapter record;
-     cur_user record;
-    BEGIN
-      SELECT * FROM public.verses WHERE verses.id = verse_id INTO current_verse;
-      -- the verse must exist and must be assigned to a translator
-      IF current_verse.project_translator_id IS NULL THEN
-        RETURN FALSE;
-      END IF;
-
-      -- user must be on this project
-      IF authorize(auth.uid(), current_verse.project_id) IN ('user') THEN RETURN FALSE;
-      END IF;
-
-      SELECT chapters.id FROM public.chapters WHERE chapters.id = current_verse.chapter_id AND chapters.started_at IS NOT NULL AND chapters.finished_at IS NULL INTO current_chapter;
-      -- the chapter should be in the process of being translated
-      IF current_chapter.id IS NULL THEN
-        RETURN FALSE;
-      END IF;
-
-      SELECT project_translators.user_id AS id FROM public.project_translators WHERE project_translators.id = current_verse.project_translator_id AND project_translators.project_id = current_verse.project_id AND project_translators.user_id = auth.uid() INTO cur_user;
-      -- the current user must be a translator on the project, and must be assigned to this verse
-      IF cur_user.id IS NULL THEN
-        RETURN FALSE;
-      END IF;
-
-      UPDATE PUBLIC.verses SET "text" = save_verse.new_verse WHERE verses.id = save_verse.verse_id;
-
-      RETURN true;
-
-    END;
-  $$;
-
-  -- since the user cannot directly correct the fields in the user table, he calls this function to mark the confession
-  CREATE FUNCTION PUBLIC.check_confession() RETURNS BOOLEAN
-    LANGUAGE plpgsql SECURITY DEFINER AS $$
-    DECLARE
-
-    BEGIN
-      UPDATE PUBLIC.users SET confession = TRUE WHERE users.id = auth.uid();
-
-      RETURN TRUE;
-
-    END;
-  $$;
-
-  -- and this function to set the agreement
-  CREATE FUNCTION PUBLIC.check_agreement() RETURNS BOOLEAN
-    LANGUAGE plpgsql SECURITY DEFINER AS $$
-    DECLARE
-
-    BEGIN
-      UPDATE PUBLIC.users SET agreement = TRUE WHERE users.id = auth.uid();
-
-      RETURN TRUE;
-
-    END;
-  $$;
-
-  -- for rls, a function that allows only the admin to do something
-  CREATE FUNCTION PUBLIC.admin_only()
-    RETURNS BOOLEAN LANGUAGE plpgsql SECURITY DEFINER AS $$
-    DECLARE
-      access INT;
-
-    BEGIN
-      SELECT
-        COUNT(*) INTO access
-      FROM
-        PUBLIC.users
-      WHERE
-        users.id = auth.uid() AND users.is_admin;
-
-      RETURN access > 0;
-
-    END;
-  $$;
-
-  -- for rls, a function that checks if the user is a verse translator
-  -- can use the function to write the user ID to the table right away, otherwise you will often have to do such checks
-  CREATE FUNCTION PUBLIC.can_translate(translator_id BIGINT)
-    returns BOOLEAN LANGUAGE plpgsql SECURITY DEFINER AS $$
-    DECLARE
-      access INT;
-
-    BEGIN
-      SELECT
-        COUNT(*) INTO access
-      FROM
-        PUBLIC.project_translators
-      WHERE
-        user_id = auth.uid() AND id = can_translate.translator_id;
-
-      RETURN access > 0;
-
-    END;
-  $$;
-
-  -- A new function for moving to the next step (we indicate specifically which step is now) (check that the user has the right to edit these verses, find out the ID of the next step, change the ID of the step for all verses)
-  CREATE FUNCTION PUBLIC.go_to_step(project TEXT, chapter INT2, book PUBLIC.book_code, current_step INT2) RETURNS INTEGER
-    LANGUAGE plpgsql SECURITY DEFINER AS $$
-    DECLARE
-      proj_trans RECORD;
-      cur_step INT2;
-      cur_chapter_id BIGINT;
-      next_step RECORD;
-    BEGIN
-
-      SELECT
-        project_translators.id, projects.id AS project_id INTO proj_trans
-      FROM
-        PUBLIC.project_translators LEFT JOIN PUBLIC.projects ON (projects.id = project_translators.project_id)
-      WHERE
-        project_translators.user_id = auth.uid() AND projects.code = go_to_step.project;
-
-      -- Is there such a translator on the project
-      IF proj_trans.id IS NULL THEN
-        RETURN 0;
-      END IF;
-
-      -- get chapter id
-      SELECT chapters.id INTO cur_chapter_id
-      FROM PUBLIC.chapters
-      WHERE chapters.num = go_to_step.chapter AND chapters.project_id = proj_trans.project_id AND chapters.book_id = (SELECT id FROM PUBLIC.books WHERE books.code = go_to_step.book AND books.project_id = proj_trans.project_id);
-
-      -- chapter validation
-      IF cur_chapter_id IS NULL THEN
-        RETURN 0;
-      END IF;
-
-      SELECT
-        sorting INTO cur_step
-      FROM
-        PUBLIC.verses LEFT JOIN PUBLIC.steps ON (steps.id = verses.current_step)
-      WHERE verses.chapter_id = cur_chapter_id
-        AND project_translator_id = proj_trans.id
-      LIMIT 1;
-
-      -- Are there verses assigned to him, and find out at what step now
-      IF cur_step IS NULL THEN
-        RETURN 0;
-      END IF;
-
-      IF cur_step != go_to_step.current_step THEN
-        RETURN cur_step;
-      END IF;
-
-      SELECT id, sorting INTO next_step
-      FROM PUBLIC.steps
-      WHERE steps.project_id = proj_trans.project_id
-        AND steps.sorting > cur_step
-      ORDER BY steps.sorting
-      LIMIT 1;
-
-      -- get from the base, what is the next step, if it is not there, then do nothing
-      IF next_step.id IS NULL THEN
-        RETURN cur_step;
-      END IF;
-
-      -- If yes, then update the database
-      UPDATE PUBLIC.verses SET current_step = next_step.id WHERE verses.chapter_id = cur_chapter_id
-        AND verses.project_translator_id = proj_trans.id;
-
-      RETURN next_step.sorting;
-
-    END;
-  $$;
-
-  -- blocking a user, can only be called by an admin, it is impossible to block another admin
-  CREATE FUNCTION PUBLIC.block_user(user_id uuid) returns TEXT
-    LANGUAGE plpgsql SECURITY DEFINER AS $$
-    DECLARE
-      blocked_user RECORD;
-    BEGIN
-      IF NOT PUBLIC.admin_only() THEN
-        RETURN FALSE;
-      END IF;
-
-      SELECT blocked, is_admin INTO blocked_user FROM PUBLIC.users WHERE id = block_user.user_id;
-      IF blocked_user.is_admin = TRUE THEN
-        RETURN FALSE;
-      END IF;
-
-      IF blocked_user.blocked IS NULL THEN
-        UPDATE PUBLIC.users SET blocked = NOW() WHERE id = block_user.user_id;
-      ELSE
-        UPDATE PUBLIC.users SET blocked = NULL WHERE id = block_user.user_id;
-      END IF;
-
-      RETURN TRUE;
-
-    END;
-  $$;
-
-  CREATE FUNCTION PUBLIC.update_chapters_in_books(book_id BIGINT, chapters_new JSON, project_id BIGINT) RETURNS BOOLEAN
-    LANGUAGE plpgsql SECURITY DEFINER AS $$
-    DECLARE chapters_old JSON;
-    BEGIN
-      IF authorize(auth.uid(), project_id) NOT IN ('admin', 'coordinator') THEN RETURN FALSE;
-      END IF;
-      SELECT json_build_object('chapters',chapters) FROM PUBLIC.books WHERE books.id = book_id AND books.project_id = update_chapters_in_books.project_id INTO chapters_old;
-      INSERT INTO PUBLIC.logs (log) VALUES (json_build_object('function','update_chapters_in_books', 'book_id', book_id, 'chapters', update_chapters_in_books.chapters_new, 'project_id', project_id, 'old values', chapters_old));
-      UPDATE PUBLIC.books SET chapters = update_chapters_in_books.chapters_new WHERE books.id = book_id AND books.project_id = update_chapters_in_books.project_id;
-      RETURN TRUE;
-    END;
-  $$;
-
-  CREATE FUNCTION PUBLIC.insert_additional_chapter(book_id BIGINT, verses int4, project_id BIGINT, num INT2) RETURNS BOOLEAN
-    LANGUAGE plpgsql SECURITY DEFINER AS $$
-    BEGIN
-      IF authorize(auth.uid(), project_id) NOT IN ('admin', 'coordinator') THEN RETURN FALSE;
-      END IF;
-      INSERT INTO PUBLIC.logs (log) VALUES (json_build_object('function', 'insert_additional_chapter', 'book_id', book_id, 'verses', verses, 'project_id', project_id, 'num',  num));
-      INSERT INTO PUBLIC.chapters (num, verses, book_id, project_id) VALUES (num, verses, book_id, project_id)
-      ON CONFLICT ON CONSTRAINT chapters_book_id_num_key
-            DO NOTHING;
-      RETURN TRUE;
-    END;
-  $$;
-
-  CREATE FUNCTION PUBLIC.update_verses_in_chapters(book_id BIGINT, verses_new INTEGER, num INT2, project_id BIGINT) RETURNS JSON
-    LANGUAGE plpgsql SECURITY DEFINER AS $$
-    DECLARE chapter JSON;
-            verses_old JSON;
-    BEGIN
-      IF authorize(auth.uid(), project_id) NOT IN ('admin', 'coordinator') THEN RETURN FALSE;
-      END IF;
-      SELECT json_build_object('verses', verses) FROM PUBLIC.chapters WHERE chapters.book_id = update_verses_in_chapters.book_id AND chapters.project_id = update_verses_in_chapters.project_id INTO verses_old;
-      INSERT INTO PUBLIC.logs (log) VALUES (json_build_object('function', 'update_verses_in_chapters', 'book_id', book_id, 'verses', update_verses_in_chapters.verses_new, 'project_id', project_id, 'old values', verses_old));
-      UPDATE PUBLIC.chapters SET verses = update_verses_in_chapters.verses_new WHERE chapters.book_id = update_verses_in_chapters.book_id AND chapters.num = update_verses_in_chapters.num AND chapters.project_id = update_verses_in_chapters.project_id;
-      SELECT json_build_object('id', id, 'started_at', started_at) FROM PUBLIC.chapters WHERE chapters.book_id = update_verses_in_chapters.book_id AND chapters.num = update_verses_in_chapters.num INTO chapter;
-      RETURN chapter;
-    END;
-  $$;
-
-  CREATE FUNCTION PUBLIC.insert_additional_verses(start_verse INT2, finish_verse INT2, chapter_id BIGINT, project_id INTEGER) RETURNS BOOLEAN
-    LANGUAGE plpgsql SECURITY DEFINER AS $$
-    DECLARE step_id BIGINT;
-    BEGIN
-      IF authorize(auth.uid(), project_id) NOT IN ('admin', 'coordinator') THEN RETURN FALSE;
-      END IF;
-      IF finish_verse < start_verse THEN
-        RETURN false;
-      END IF;
-      SELECT id FROM steps WHERE steps.project_id = insert_additional_verses.project_id AND sorting = 1 INTO step_id;
-      INSERT INTO PUBLIC.logs (log) VALUES ( json_build_object('function', 'insert_additional_verses', 'start_verse', start_verse, 'step_id', id, 'finish_verse', finish_verse, 'chapter_id', chapter_id, 'project_id', project_id));
-
-      FOR i IN start_verse..finish_verse LOOP
-        INSERT INTO
-          PUBLIC.verses (num, chapter_id, current_step, project_id)
-        VALUES
-          (i, chapter_id, step_id, project_id)
-          ON CONFLICT ON CONSTRAINT verses_chapter_id_num_key
-          DO NOTHING;
-      END LOOP;
-      RETURN TRUE;
-    END;
-  $$;
-
-  CREATE FUNCTION PUBLIC.update_resources_in_projects(resources_new JSON, base_manifest_new JSON, project_id BIGINT) RETURNS BOOLEAN
-    LANGUAGE plpgsql SECURITY DEFINER AS $$
-    DECLARE old_values JSON;
-    BEGIN
-      IF authorize(auth.uid(), project_id) NOT IN ('admin', 'coordinator') THEN RETURN FALSE;
-      END IF;
-      SELECT json_build_object('resources', resources, 'base_manifest', base_manifest) FROM PUBLIC.projects WHERE id = update_resources_in_projects.project_id INTO old_values;
-      INSERT INTO PUBLIC.logs (log) VALUES (json_build_object('function', 'update_resources_in_projects','resources', update_resources_in_projects.resources_new, 'base_manifest', update_resources_in_projects.base_manifest_new, 'project_id', project_id, 'old values', old_values));
-      UPDATE PUBLIC.projects SET resources = update_resources_in_projects.resources_new, base_manifest = update_resources_in_projects.base_manifest_new WHERE id = project_id;
-      RETURN TRUE;
-    END;
-  $$;
-
-  -- create policy "политика с джойном"
-  --   on teams
-  --   for update using (
-  --     auth.uid() in (
-  --       select user_id from members
-  --       WHERE team_id = id
-  --     )
-  --   );
-
-  -- inserts a row into public.users
-  CREATE FUNCTION PUBLIC.handle_new_user() RETURNS TRIGGER
-    LANGUAGE plpgsql SECURITY DEFINER AS $$ BEGIN
-      INSERT INTO
-        PUBLIC.users (id, email, login)
-      VALUES
-        (NEW.id, NEW.email, NEW.raw_user_meta_data ->> 'login');
-
-      RETURN NEW;
-
-    END;
-
-  $$;
-
-  -- creating a new brief for the project
-  CREATE FUNCTION PUBLIC.create_brief(project_id BIGINT, is_enable BOOLEAN) RETURNS BOOLEAN
-      LANGUAGE plpgsql SECURITY DEFINER AS $$
-      DECLARE
-        brief_JSON JSON;
-      BEGIN
-        IF authorize(auth.uid(), create_brief.project_id) NOT IN ('admin', 'coordinator') THEN
-          RETURN false;
-        END IF;
-        SELECT brief FROM PUBLIC.methods
-          JOIN PUBLIC.projects ON (projects.method = methods.title)
-          WHERE projects.id = project_id INTO brief_JSON;
-          INSERT INTO PUBLIC.briefs (project_id, data_collection, is_enable) VALUES (project_id, brief_JSON, is_enable);
-        RETURN true;
-      END;
-  $$;
-
-  -- after creating a book, create chapters
-  CREATE FUNCTION PUBLIC.handle_new_book() RETURNS TRIGGER
-    LANGUAGE plpgsql SECURITY DEFINER AS $$ BEGIN
-      IF (PUBLIC.create_chapters(NEW.id)) THEN
-        RETURN NEW;
-      ELSE
-        RETURN NULL;
-      END IF;
-    END;
-  $$;
-
-  -- after switching to a new step - save the previous one in progress
-  CREATE FUNCTION PUBLIC.handle_next_step() RETURNS TRIGGER
-    LANGUAGE plpgsql SECURITY DEFINER AS $$ BEGIN
-      IF NEW.current_step = OLD.current_step THEN
-        RETURN NEW;
-      END IF;
-      INSERT INTO
-        PUBLIC.progress (verse_id, "text", step_id)
-      VALUES
-        (NEW.id, NEW.text, OLD.current_step);
-
-      RETURN NEW;
-
-    END;
-  $$;
-
-  -- update changed_at to current time/date when personal_notes is updating
-  CREATE FUNCTION PUBLIC.handle_update_personal_notes() RETURNS TRIGGER
-    LANGUAGE plpgsql SECURITY DEFINER AS $$ BEGIN
-      NEW.changed_at:=NOW();
-
-      RETURN NEW;
-
-    END;
-  $$;
-
-  -- update changed_at to current time/date when team_notes is updating
-  CREATE FUNCTION PUBLIC.handle_update_team_notes() RETURNS TRIGGER
-    LANGUAGE plpgsql SECURITY DEFINER AS $$ BEGIN
-      NEW.changed_at:=NOW();
-
-      RETURN NEW;
-
-    END;
-  $$;
-
-  -- update array of alphabet in projects column when added new word with new first symbol
-  CREATE FUNCTION PUBLIC.handle_update_dictionaries() RETURNS TRIGGER
-    LANGUAGE plpgsql SECURITY DEFINER AS $$
-    DECLARE
-      alphabet JSONB;
-    BEGIN
-      IF upper(OLD.title::VARCHAR(1)) = upper(NEW.title::VARCHAR(1)) THEN
-        RETURN NEW;
-      END IF;
-      SELECT dictionaries_alphabet INTO alphabet FROM PUBLIC.projects WHERE NEW.project_id = projects.id;
-        IF (SELECT alphabet ? upper(NEW.title::VARCHAR(1))) THEN
-          RETURN NEW;
-        ELSE
-          UPDATE PUBLIC.projects SET dictionaries_alphabet = alphabet || to_jsonb( upper(NEW.title::VARCHAR(1))) WHERE projects.id = NEW.project_id;
-        END IF;
-      RETURN NEW;
-    END;
-  $$;
-
-  CREATE FUNCTION PUBLIC.handle_compile_chapter() RETURNS TRIGGER
+CREATE FUNCTION PUBLIC.handle_compile_chapter() RETURNS TRIGGER
     LANGUAGE plpgsql SECURITY DEFINER AS $$
     DECLARE
       chapter JSONB;
     BEGIN
       IF (NEW.finished_at IS NOT NULL) THEN
-        SELECT jsonb_object_agg(num, "text" ORDER BY num ASC) FROM PUBLIC.verses WHERE project_id = OLD.project_id AND chapter_id = OLD.id INTO chapter;
+        SELECT jsonb_object_agg(num, "text" ORDER BY num ASC) FROM PUBLIC.verses WHERE project_id = OLD.project_id AND chapter_id = OLD.id AND num < 201 INTO chapter;
         NEW.text=chapter;
       END IF;
       RETURN NEW;
@@ -771,7 +497,7 @@
       -- find out the id of the translator on the project
       -- find out the ID of the chapter we are translating, make sure that the translation is still in progress
       -- in a loop update the text of the verses, taking into account the id of the translator and the chapter
-      -- Maybe take the chapter number here. Get the IDs of all the poems that this user has. And then in the cycle to compare these IDs
+      -- Maybe take the chapter number here. Get the IDs of all the verse that this user has. And then in the cycle to compare these IDs
       -- TODO correct necessarily
       FOR new_verses IN SELECT * FROM json_each_text(save_verses.verses)
       LOOP
@@ -790,55 +516,335 @@
 
   -- create verses
   CREATE FUNCTION PUBLIC.create_verses(chapter_id BIGINT) RETURNS BOOLEAN
-    LANGUAGE plpgsql SECURITY DEFINER AS $$
+  LANGUAGE plpgsql SECURITY DEFINER AS $$
+  DECLARE
+    chapter RECORD;
+    start_verse int;
+    method_type text;
+  BEGIN
+    -- 1. Get the number of verses
+    SELECT  chapters.id AS id,
+            chapters.verses AS verses,
+            chapters.project_id AS project_id,
+            steps.id AS step_id
+    FROM PUBLIC.chapters
+    JOIN PUBLIC.steps ON (steps.project_id = chapters.project_id)
+    WHERE chapters.id = create_verses.chapter_id
+    ORDER BY steps.sorting ASC
+    LIMIT 1
+    INTO chapter;
 
-    DECLARE
-      chapter RECORD;
-      start_verse int;
-      method_type text;
-    BEGIN
-      -- 1. Get the number of verses
-      SELECT  chapters.id AS id,
-              chapters.verses AS verses,
-              chapters.project_id AS project_id,
-              steps.id AS step_id
-        FROM PUBLIC.chapters
-          JOIN PUBLIC.steps ON (steps.project_id = chapters.project_id)
-        WHERE chapters.id = create_verses.chapter_id
-        ORDER BY steps.sorting ASC
-        LIMIT 1
-        INTO chapter;
-
-      IF authorize(auth.uid(), chapter.project_id) NOT IN ('admin', 'coordinator')
-      THEN
-        RETURN FALSE;
-      END IF;
-      method_type = (SELECT type FROM projects WHERE id = chapter.project_id);
-      IF method_type = 'obs'
-      THEN
-        start_verse = 0;
-      ELSE
-        start_verse = 1;
-      END IF;
-      FOR i IN start_verse..chapter.verses LOOP
-        INSERT INTO
-          PUBLIC.verses (num, chapter_id, current_step, project_id)
-        VALUES
-          (i , chapter.id, chapter.step_id, chapter.project_id);
-      END LOOP;
-      IF method_type = 'obs'
-      THEN
-       INSERT INTO
-          PUBLIC.verses (num, chapter_id, current_step, project_id)
-        VALUES
-          (200 , chapter.id, chapter.step_id, chapter.project_id);
-      ELSE
-        RETURN true;
-      END IF;
+    IF authorize(auth.uid(), chapter.project_id) NOT IN ('admin', 'coordinator')
+    THEN
+      RETURN FALSE;
+    END IF;
+    method_type = (SELECT type FROM projects WHERE id = chapter.project_id);
+    IF method_type = 'obs'
+    THEN
+      start_verse = 0;
+    ELSE
+      start_verse = 1;
+    END IF;
+    FOR i IN start_verse..chapter.verses LOOP
+      INSERT INTO
+        PUBLIC.verses (num, chapter_id, current_step, project_id)
+      VALUES
+        (i , chapter.id, chapter.step_id, chapter.project_id);
+    END LOOP;
+    FOR i IN 201..220 LOOP
+      INSERT INTO
+        PUBLIC.verses (num, chapter_id, current_step, project_id)
+      VALUES
+        (i , chapter.id, chapter.step_id, chapter.project_id);
+    END LOOP;
+    IF method_type = 'obs'
+    THEN
+      INSERT INTO
+        PUBLIC.verses (num, chapter_id, current_step, project_id)
+      VALUES
+        (200 , chapter.id, chapter.step_id, chapter.project_id);
+    ELSE
       RETURN true;
+    END IF;
+    RETURN true;      
+  END;
+  $$;
+
+  -- create update_project_basic
+  CREATE FUNCTION PUBLIC.update_project_basic( project_code TEXT,title TEXT,orig_title TEXT,code TEXT, language_id BIGINT ) RETURNS BOOLEAN
+    LANGUAGE plpgsql SECURITY DEFINER AS $$
+    DECLARE
+      project_id BIGINT;
+    BEGIN
+      SELECT id FROM public.projects WHERE projects.code = project_code INTO project_id;
+        IF authorize(auth.uid(), project_id) NOT IN ('admin') THEN
+          RAISE EXCEPTION SQLSTATE '42000' USING MESSAGE = 'No access rights to this function';
+        END IF;
+      IF update_project_basic.project_code != update_project_basic.code THEN
+        SELECT id FROM public.projects WHERE projects.code = update_project_basic.code INTO project_id;
+        IF project_id IS NOT NULL THEN
+          RAISE EXCEPTION SQLSTATE '23505' USING MESSAGE = 'This project code is already in use';
+        END IF;
+      END IF;
+
+      UPDATE PUBLIC.projects SET code = update_project_basic.code, title=update_project_basic.title, orig_title = update_project_basic.orig_title, language_id = update_project_basic.language_id WHERE projects.id = project_id;
+
+      RETURN TRUE;
 
     END;
+   $$;
+
+  -- update multiple steps
+  CREATE FUNCTION update_multiple_steps(steps jsonb[], project_id BIGINT) RETURNS BOOLEAN
+      LANGUAGE plpgsql SECURITY DEFINER AS $$
+    DECLARE
+      step jsonb;
+    BEGIN
+      IF authorize(auth.uid(), update_multiple_steps.project_id) NOT IN ('admin') THEN
+        RETURN FALSE;
+      END IF;
+      FOREACH step IN ARRAY update_multiple_steps.steps
+      LOOP
+        UPDATE public.steps
+        SET
+          title = (step->>'title')::TEXT,
+          description = (step->>'description')::TEXT,
+          intro = (step->>'intro')::TEXT
+         WHERE id = (step->>'id')::BIGINT AND update_multiple_steps.project_id = public.steps.project_id;
+      END LOOP;
+      RETURN TRUE;
+    END;
   $$;
+
+  -- This function calculates the next available sorting value for root records in the personal_notes & team_notes table
+  CREATE FUNCTION PUBLIC.get_max_sorting(table_name TEXT, user_id UUID DEFAULT NULL, project_id INT8 DEFAULT NULL) RETURNS integer
+    LANGUAGE plpgsql SECURITY DEFINER AS $$
+    DECLARE
+      max_sorting_value integer;
+    BEGIN
+      IF table_name = 'personal_notes' THEN
+        EXECUTE format('
+          SELECT COALESCE(MAX(sorting), -1)
+          FROM %I
+          WHERE parent_id IS NULL AND user_id = $1', table_name)
+        INTO max_sorting_value
+        USING user_id;
+      ELSIF table_name = 'team_notes' THEN
+        EXECUTE format('
+          SELECT COALESCE(MAX(sorting), -1)
+          FROM %I
+          WHERE parent_id IS NULL AND project_id = $1', table_name)
+        INTO max_sorting_value
+        USING project_id;
+      END IF;
+
+      RETURN max_sorting_value + 1;
+    END;
+  $$;
+
+  -- This function sets the sort value for a new entry in the personal_notes & team_notes table
+  CREATE FUNCTION PUBLIC.set_sorting_before_insert() RETURNS TRIGGER
+      LANGUAGE plpgsql SECURITY DEFINER AS $$
+    DECLARE
+      user_id UUID;
+      project_id INT8;
+    BEGIN
+      IF TG_TABLE_NAME = 'personal_notes' THEN
+        SELECT NEW.user_id INTO user_id;
+        NEW.sorting := get_max_sorting('personal_notes', user_id, NULL);
+      ELSIF TG_TABLE_NAME = 'team_notes' THEN
+        SELECT NEW.project_id INTO project_id;
+        NEW.sorting := get_max_sorting('team_notes', NULL, project_id);
+      END IF;
+      RETURN NEW;
+    END;
+  $$;
+
+  -- Updating sorting values for the remaining records in the table after deleting an element
+  CREATE FUNCTION PUBLIC.correct_sorting_on_deletion() RETURNS TRIGGER
+  LANGUAGE plpgsql SECURITY DEFINER AS $$
+  DECLARE
+    parent_sorting INT;
+    user_id UUID;
+    project_id INT8;
+  BEGIN
+    IF TG_TABLE_NAME = 'personal_notes' THEN
+      SELECT OLD.user_id INTO user_id;
+
+      IF OLD.parent_id IS NULL THEN
+        IF NEW.sorting IS NULL THEN
+          EXECUTE format('
+            UPDATE PUBLIC.%I
+            SET sorting = sorting - 1
+            WHERE user_id = $1 AND parent_id IS NULL AND sorting > $2',
+            TG_TABLE_NAME)
+          USING user_id, OLD.sorting;
+        END IF;
+        ELSE
+          SELECT sorting INTO parent_sorting
+          FROM PUBLIC.personal_notes
+          WHERE id = OLD.parent_id;
+
+          IF NEW.sorting IS NULL THEN
+            EXECUTE format('
+              UPDATE PUBLIC.%I
+              SET sorting = sorting - 1
+              WHERE user_id = $1 AND parent_id = $2 AND sorting > $3',
+              TG_TABLE_NAME)
+            USING user_id, OLD.parent_id, OLD.sorting - parent_sorting;
+          END IF;
+      END IF;
+    ELSE -- TG_TABLE_NAME = 'team_notes'
+      SELECT OLD.project_id INTO project_id;
+
+      IF OLD.parent_id IS NULL THEN
+        IF NEW.sorting IS NULL THEN
+          EXECUTE format('
+            UPDATE PUBLIC.%I
+            SET sorting = sorting - 1
+            WHERE project_id = $1 AND parent_id IS NULL AND sorting > $2',
+            TG_TABLE_NAME)
+          USING project_id, OLD.sorting;
+        END IF;
+      ELSE
+        SELECT sorting INTO parent_sorting
+        FROM PUBLIC.team_notes
+        WHERE id = OLD.parent_id;
+
+        IF NEW.sorting IS NULL THEN
+          EXECUTE format('
+            UPDATE PUBLIC.%I
+            SET sorting = sorting - 1
+            WHERE project_id = $1 AND parent_id = $2 AND sorting > $3',
+            TG_TABLE_NAME)
+          USING project_id, OLD.parent_id, OLD.sorting - parent_sorting;
+        END IF;
+      END IF;
+    END IF;
+
+    RETURN OLD;
+  END;
+  $$;
+
+  -- Function for Drag and Drop node repositioning in the notes tree
+  CREATE FUNCTION PUBLIC.move_node(
+    new_sorting_value INT,
+    dragged_node_id VARCHAR,
+    new_parent_id VARCHAR,
+    table_name TEXT,
+    project_id INT8 DEFAULT NULL,
+    user_id UUID DEFAULT NULL
+  ) RETURNS VOID
+  LANGUAGE plpgsql SECURITY DEFINER AS $$
+  DECLARE
+    old_sorting INT;
+    old_parent_id VARCHAR;
+    note_user_id UUID;
+    note_project_id INT8;
+  BEGIN
+    IF table_name = 'personal_notes' THEN
+      EXECUTE format('
+        SELECT sorting, parent_id, user_id
+        FROM PUBLIC.%I
+        WHERE id = $1', table_name)
+      INTO old_sorting, old_parent_id, note_user_id
+      USING dragged_node_id;
+
+      IF note_user_id != user_id THEN
+        RAISE EXCEPTION 'You are not allowed to move this note';
+      END IF;
+    ELSIF table_name = 'team_notes' THEN
+      EXECUTE format('
+        SELECT sorting, parent_id, project_id
+        FROM PUBLIC.%I
+        WHERE id = $1', table_name)
+      INTO old_sorting, old_parent_id, note_project_id
+      USING dragged_node_id;
+
+      IF note_project_id != project_id THEN
+        RAISE EXCEPTION 'You are not allowed to move this note';
+      END IF;
+    END IF;
+
+    IF old_sorting IS NOT NULL THEN
+      -- if the new sorting is equal to the old one, or greater than the old one by one and the action is in the common parent, then we do nothing
+      IF (new_sorting_value = old_sorting OR new_sorting_value = old_sorting + 1) AND (old_parent_id = new_parent_id OR (old_parent_id IS NULL AND new_parent_id IS NULL)) THEN
+        RETURN;
+
+      -- if the new sorting is greater than the old sorting and the action is in a common parent
+      ELSIF new_sorting_value > old_sorting AND (new_parent_id = old_parent_id OR (old_parent_id IS NULL AND new_parent_id IS NULL)) THEN
+        new_sorting_value := new_sorting_value - 1;
+        IF table_name = 'personal_notes' THEN
+          EXECUTE format('
+            UPDATE PUBLIC.%I
+            SET sorting = sorting - 1
+            WHERE user_id = $1 AND sorting > $2 AND sorting <= $3 AND (parent_id = $4 OR (parent_id IS NULL AND $5 IS NULL))', table_name)
+          USING note_user_id, old_sorting, new_sorting_value, new_parent_id, new_parent_id;
+        ELSIF table_name = 'team_notes' THEN
+          EXECUTE format('
+            UPDATE PUBLIC.%I
+            SET sorting = sorting - 1
+            WHERE project_id = $1 AND sorting > $2 AND sorting <= $3 AND (parent_id = $4 OR (parent_id IS NULL AND $5 IS NULL))', table_name)
+          USING note_project_id, old_sorting, new_sorting_value, new_parent_id, new_parent_id;
+        END IF;
+
+      -- if the new sorting is smaller than the old sorting and the action is in the common parent
+      ELSIF new_sorting_value < old_sorting AND (new_parent_id = old_parent_id OR (old_parent_id IS NULL AND new_parent_id IS NULL)) THEN
+        IF table_name = 'personal_notes' THEN
+          EXECUTE format('
+            UPDATE PUBLIC.%I
+            SET sorting = sorting + 1
+            WHERE user_id = $1 AND sorting < $2 AND sorting >= $3 AND (parent_id = $4 OR (parent_id IS NULL AND $5 IS NULL))', table_name)
+          USING note_user_id, old_sorting, new_sorting_value, new_parent_id, new_parent_id;
+        ELSIF table_name = 'team_notes' THEN
+          EXECUTE format('
+            UPDATE PUBLIC.%I
+            SET sorting = sorting + 1
+            WHERE project_id = $1 AND sorting < $2 AND sorting >= $3 AND (parent_id = $4 OR (parent_id IS NULL AND $5 IS NULL))', table_name)
+          USING note_project_id, old_sorting, new_sorting_value, new_parent_id, new_parent_id;
+        END IF;
+
+      -- if we move to a new folder, then in the old folder we reduce the sorting of all elements that are larger than the old sorting
+      ELSIF new_parent_id IS DISTINCT FROM old_parent_id THEN
+        IF table_name = 'personal_notes' THEN
+          EXECUTE format('
+            UPDATE PUBLIC.%I
+            SET sorting = sorting - 1
+            WHERE user_id = $1 AND sorting > $2 AND (parent_id = $3 OR (parent_id IS NULL AND $4 IS NULL))', table_name)
+          USING note_user_id, old_sorting, old_parent_id, old_parent_id;
+
+          -- in the new folder we increase the sorting of all elements whose sorting is equal to or greater than the new sorting
+          EXECUTE format('
+            UPDATE PUBLIC.%I
+            SET sorting = sorting + 1
+            WHERE user_id = $1 AND sorting >= $2 AND (parent_id = $3 OR (parent_id IS NULL AND $4 IS NULL))', table_name)
+          USING note_user_id, new_sorting_value, new_parent_id, new_parent_id;
+        ELSIF table_name = 'team_notes' THEN
+          EXECUTE format('
+            UPDATE PUBLIC.%I
+            SET sorting = sorting - 1
+            WHERE project_id = $1 AND sorting > $2 AND (parent_id = $3 OR (parent_id IS NULL AND $4 IS NULL))', table_name)
+          USING note_project_id, old_sorting, old_parent_id, old_parent_id;
+
+          -- in the new folder we increase the sorting of all elements whose sorting is equal to or greater than the new sorting
+          EXECUTE format('
+            UPDATE PUBLIC.%I
+            SET sorting = sorting + 1
+            WHERE project_id = $1 AND sorting >= $2 AND (parent_id = $3 OR (parent_id IS NULL AND $4 IS NULL))', table_name)
+          USING note_project_id, new_sorting_value, new_parent_id, new_parent_id;
+        END IF;
+      END IF;
+    END IF;
+
+    -- update the moved node
+    EXECUTE format('
+      UPDATE PUBLIC.%I
+      SET sorting = $1, parent_id = $2
+      WHERE id = $3', table_name)
+    USING new_sorting_value, new_parent_id, dragged_node_id;
+  END;
+  $$;
+
 -- END CREATE FUNCTION
 
 -- USERS
@@ -850,7 +856,8 @@
       agreement BOOLEAN NOT NULL DEFAULT FALSE,
       confession BOOLEAN NOT NULL DEFAULT FALSE,
       is_admin BOOLEAN NOT NULL DEFAULT FALSE,
-      blocked TIMESTAMP DEFAULT NULL
+      blocked TIMESTAMP DEFAULT NULL,
+      avatar_url VARCHAR(255) DEFAULT NULL
     );
 
     ALTER TABLE
@@ -963,7 +970,7 @@
     CREATE TABLE PUBLIC.projects (
       id BIGINT GENERATED ALWAYS AS IDENTITY primary key,
       title TEXT NOT NULL,
-      orig_title TEXT NOT NULL,
+      orig_title TEXT DEFAULT NULL,
       code TEXT NOT NULL,
       language_id BIGINT REFERENCES PUBLIC.languages ON
       DELETE
@@ -1131,6 +1138,7 @@
       count_of_users INT2 NOT NULL,
       whole_chapter BOOLEAN DEFAULT true,
       "time" INT2 NOT NULL,
+      is_awaiting_team BOOLEAN DEFAULT false,
       project_id BIGINT REFERENCES PUBLIC.projects ON
       DELETE
         CASCADE NOT NULL,
@@ -1157,6 +1165,12 @@
     CREATE POLICY "Добавлять можно только админу" ON PUBLIC.steps FOR
     INSERT
       WITH CHECK (admin_only());
+
+    DROP POLICY IF EXISTS "Обновлять может только админ" ON PUBLIC.steps;
+
+    CREATE POLICY "Обновлять может только админ" ON PUBLIC.steps FOR
+      UPDATE
+          USING (admin_only());
   -- END RLS
 -- END STEPS
 
@@ -1191,11 +1205,11 @@
     SELECT
       TO authenticated USING (authorize(auth.uid(), project_id) != 'user');
 
-    DROP POLICY IF EXISTS "Добавлять можно только админу" ON PUBLIC.books;
+    DROP POLICY IF EXISTS "Добавлять можно админу или координатору" ON PUBLIC.books;
 
-    CREATE POLICY "Добавлять можно только админу" ON PUBLIC.books FOR
-    INSERT
-      WITH CHECK (admin_only());
+    CREATE POLICY "Добавлять можно админу или координатору" ON PUBLIC.books FOR
+      INSERT
+      WITH CHECK (authorize(auth.uid(), project_id) IN ('admin', 'coordinator'));
 
   -- END RLS
 -- END BOOKS
@@ -1269,7 +1283,7 @@
     SELECT
       TO authenticated USING (authorize(auth.uid(), project_id) != 'user');
 
-    -- We create poems automatically, so no one can add
+    -- We create verses automatically, so no one can add
 
     -- Direct editing is also forbidden. We can edit only two fields, the current step and the text of the verse
 
@@ -1312,7 +1326,8 @@
       changed_at TIMESTAMP DEFAULT NOW(),
       deleted_at TIMESTAMP DEFAULT NULL,
       is_folder BOOLEAN DEFAULT FALSE,
-      parent_id TEXT DEFAULT NULL
+      parent_id TEXT DEFAULT NULL,
+      sorting INT DEFAULT NULL
     );
     ALTER TABLE
       PUBLIC.personal_notes enable ROW LEVEL SECURITY;
@@ -1360,7 +1375,8 @@
       changed_at TIMESTAMP DEFAULT NOW(),
       deleted_at TIMESTAMP DEFAULT NULL,
       is_folder BOOLEAN DEFAULT FALSE,
-      parent_id TEXT DEFAULT NULL
+      parent_id TEXT DEFAULT NULL,
+      sorting INT DEFAULT NULL
     );
     ALTER TABLE
       PUBLIC.team_notes enable ROW LEVEL SECURITY;
@@ -1494,13 +1510,36 @@
     UPDATE
       ON PUBLIC.team_notes FOR each ROW EXECUTE FUNCTION PUBLIC.handle_update_team_notes();
 
-  CREATE TRIGGER on_dictionaries_update BEFORE
+  CREATE TRIGGER alphabet_change_trigger AFTER
     UPDATE
-      ON PUBLIC.dictionaries FOR each ROW EXECUTE FUNCTION PUBLIC.handle_update_dictionaries();
+      ON PUBLIC.dictionaries FOR each ROW EXECUTE FUNCTION PUBLIC.alphabet_change_handler();
+
+  CREATE TRIGGER alphabet_insert_trigger BEFORE
+  INSERT
+    ON PUBLIC.dictionaries FOR each ROW EXECUTE FUNCTION PUBLIC.alphabet_insert_handler();
 
   CREATE TRIGGER on_public_chapters_update BEFORE
     UPDATE
       ON PUBLIC.chapters FOR each ROW EXECUTE FUNCTION PUBLIC.handle_compile_chapter();
+
+  -- This trigger automatically sets the sorting when a new record is inserted.
+
+    CREATE TRIGGER before_insert_set_sorting_personal_notes BEFORE
+      INSERT
+        ON PUBLIC.personal_notes FOR each ROW EXECUTE FUNCTION PUBLIC.set_sorting_before_insert();
+
+    CREATE TRIGGER before_insert_set_sorting_team_notes BEFORE
+      INSERT
+        ON PUBLIC.team_notes FOR each ROW EXECUTE FUNCTION PUBLIC.set_sorting_before_insert();
+
+  -- After deleting a table element, we update the sorting for the remaining records
+  CREATE TRIGGER sorting_correction_on_deletion_personal_notes AFTER
+    UPDATE
+      ON PUBLIC.personal_notes FOR each ROW EXECUTE FUNCTION PUBLIC.correct_sorting_on_deletion();
+
+  CREATE TRIGGER sorting_correction_on_deletion_team_notes AFTER
+    UPDATE
+      ON PUBLIC.team_notes FOR each ROW EXECUTE FUNCTION PUBLIC.correct_sorting_on_deletion();
 
 -- END TRIGGERS
 
@@ -1550,7 +1589,7 @@
       PUBLIC.methods;
 
     INSERT INTO
-      PUBLIC.methods (title, resources, steps, "type")
+      PUBLIC.methods (title, resources, steps, "type", brief)
     VALUES
       ('CANA Bible crash test', '{"simplified":false, "literal":true, "tnotes":false, "twords":false, "tquestions":false}', '[
   {
@@ -1559,6 +1598,7 @@
     "time": 60,
     "whole_chapter": true,
     "count_of_users": 1,
+    "is_awaiting_team": false,
     "intro": "https://youtu.be/IAxFRRy5qw8\n\nЭто индивидуальная работа и выполняется до встречи с другими участниками команды КРАШ-ТЕСТА.\n\n\n\nЦЕЛЬ этого шага для КОРРЕКТОРА МАТЕРИАЛОВ: убедиться, что материалы букпэкеджа подготовлены корректно и не содержат ошибок или каких-либо трудностей для использования переводчиками.\n\nЦЕЛЬ этого шага для ТЕСТОВОГО ПЕРЕВОДЧИКА: понять общий смысл и цель книги, а также контекст (обстановку, время и место, любые факты, помогающие более точно перевести текст) и подготовиться к командному обсуждению текста перед тем, как начать перевод.\n\n\n\n\n\nОБЩИЙ ОБЗОР К КНИГЕ\n\nПрочитайте общий обзор к книге. Запишите для обсуждения командой предложения, которые могут вызвать трудности при переводе или которые требуют особого внимания от переводчиков. Также отметьте найденные ошибки или неточности в общем обзоре к книге.\n\nЭто задание выполняется только при работе над первой главой. При работе над другими главами книги возвращаться к общему обзору книги не нужно. \n\n\n\nОБЗОР К ГЛАВЕ\n\nПрочитайте обзор к главе. Запишите для обсуждения командой предложения, которые могут вызвать трудности при переводе или которые требуют особого внимания от переводчиков. Также отметьте найденные ошибки или неточности в обзоре к главе.\n\n\n\nЧТЕНИЕ ДОСЛОВНОЙ БИБЛИИ РОБ-Д (RLOB)\n\nПрочитайте ГЛАВУ ДОСЛОВНОЙ БИБЛИИ. Запишите для обсуждения командой предложения, которые могут вызвать трудности при переводе или которые требуют особого внимания от переводчиков. Также отметьте найденные ошибки или неточности в этом инструменте.\n\n\n\nЧТЕНИЕ СМЫСЛОВОЙ БИБЛИИ РОБ-С (RSOB)\n\nПрочитайте ГЛАВУ СМЫСЛОВОЙ БИБЛИИ. Запишите для обсуждения командой предложения, которые могут вызвать трудности при переводе или которые требуют особого внимания от переводчиков. Также отметьте найденные ошибки или неточности в этом инструменте.\n\n\n\nОБЗОР ИНСТРУМЕНТА «СЛОВА»\n\nПрочитайте СЛОВА к главе. Необходимо прочитать статьи к каждому слову. Отметьте для обсуждения командой статьи к словам, которые могут быть полезными для перевода Писания. Также отметьте найденные ошибки или неточности в этом инструменте.\n\n\n\nОБЗОР ИНСТРУМЕНТА «ЗАМЕТКИ»\n\nПрочитайте ЗАМЕТКИ к главе. Необходимо прочитать ЗАМЕТКИ к каждому отрывку. Отметьте для обсуждения командой ЗАМЕТКИ, которые могут быть полезными для перевода Писания. Также отметьте найденные ошибки или неточности в этом инструменте.",
     "config": [
       {
@@ -1618,6 +1658,7 @@
     "time": 120,
     "whole_chapter": true,
     "count_of_users": 4,
+    "is_awaiting_team": false,
     "intro": "https://youtu.be/d6kvUVRttUw\n\nЭто командная работа и мы рекомендуем потратить на нее не более 120 минут.\n\n\n\nЦЕЛЬ этого шага для КОРРЕКТОРА МАТЕРИАЛОВ: обсудить с командой материалы букпэкеджа. Для этого поделитесь заметками, которые вы сделали при индивидуальной работе. Обсудите все предложенные правки по инструментам букпэкеджа. Запишите командное резюме по ним для передачи команде, работающей над букпэкеджом.\n\nЦЕЛЬ этого шага для ТЕСТОВОГО ПЕРЕВОДЧИКА: обсудить командой общий смысл и цель книги, а также контекст (обстановку, время и место, любые факты, помогающие более точно перевести текст) и подготовиться к началу перевода.\n\n\n\n\n\nОБЩИЙ ОБЗОР К КНИГЕ - Обсудите ОБЩИЙ ОБЗОР К КНИГЕ. Что полезного для перевода вы нашли в этих статьях? Используйте свои заметки с самостоятельного изучения этого инструмента. Также обсудите найденные ошибки или неточности в общем обзоре к книге. Уделите этому этапу 10 минут.\n\nЭто задание выполняется только при работе над первой главой. При работе над другими главами книги возвращаться к общему обзору книги не нужно.\n\n\n\nОБЗОР К ГЛАВЕ - Обсудите ОБЗОР К ГЛАВЕ. Что полезного для перевода вы нашли в этих статьях? Используйте свои заметки с самостоятельного изучения. Также обсудите найденные ошибки или неточности в общем обзоре к главе. Уделите этому этапу 10 минут.\n\n\n\nЧТЕНИЕ РОБ-Д (RLOB) - Прочитайте вслух ГЛАВУ ДОСЛОВНОГО ПЕРЕВОДА БИБЛИИ РОБ-Д (RLOB). Обсудите предложения, которые могут вызвать трудности при переводе или которые требуют особого внимания от переводчиков. Используйте свои заметки с самостоятельного изучения этого перевода. Уделите этому этапу 20 мин.\n\n\n\nЧТЕНИЕ РОБ-С (RSOB) - Прочитайте вслух ГЛАВУ СМЫСЛОВОГО ПЕРЕВОДА БИБЛИИ РОБ-С (RSOB). Обсудите предложения, которые могут вызвать трудности при переводе или которые требуют особого внимания от переводчиков. Используйте свои заметки с самостоятельного изучения этого перевода. Уделите этому этапу 10 мин.\n\n\n\nОБЗОР ИНСТРУМЕНТА «СЛОВА» - Обсудите инструмент СЛОВА. Что полезного для перевода вы нашли в этих статьях? Используйте свои заметки с самостоятельного изучения. Также обсудите найденные ошибки или неточности в статьях этого инструмента. Уделите этому этапу 60 минут.\n\n\n\nОБЗОР ИНСТРУМЕНТА «ЗАМЕТКИ» - Обсудите инструмент ЗАМЕТКИ. Что полезного для перевода вы нашли в ЗАМЕТКАХ. Используйте свои записи по этому инструменту с самостоятельного изучения. Также обсудите найденные ошибки или неточности в этом инструменте. Уделите этому этапу 10 минут.\n\n",
     "config": [
       {
@@ -1677,6 +1718,7 @@
     "time": 30,
     "whole_chapter": false,
     "count_of_users": 2,
+    "is_awaiting_team": false,
     "intro": "https://youtu.be/ujMGcdkGGhI\n\nЭто работа в паре и мы рекомендуем потратить на нее не более 30 минут.\n\n\n\nЦЕЛЬ этого шага: подготовиться к переводу текста естественным языком.\n\nВ этом шаге вам необходимо выполнить два задания.\n\n\n\nПЕРЕСКАЗ НА РУССКОМ - Прочитайте ваш отрывок в ДОСЛОВНОМ ПЕРЕВОДЕ БИБЛИИ РОБ-Д (RLOB). Если необходимо - изучите отрывок вместе со всеми инструментами, чтобы как можно лучше передать этот текст более естественным русским языком. Перескажите смысл отрывка своему напарнику, используя максимально понятные и естественные слова русского языка. Не старайтесь пересказывать в точности исходный текст ДОСЛОВНОГО ПЕРЕВОДА. Перескажите текст в максимальной для себя простоте.\n\nПосле этого послушайте вашего напарника, пересказывающего свой отрывок. \n\nНе обсуждайте ваши пересказы - это только проговаривание и слушание.\n\n\n\nПЕРЕСКАЗ НА ЦЕЛЕВОМ - Еще раз просмотрите ваш отрывок в ДОСЛОВНОМ ПЕРЕВОДЕ БИБЛИИ РОБ-Д (RLOB) и подумайте, как пересказать этот текст на языке, на который делается перевод, помня о Резюме к переводу о стиле языка. \n\nПерескажите ваш отрывок напарнику на целевом языке, используя максимально понятные и естественные слова этого языка. Передайте всё, что вы запомнили, не подглядывая в текст. \n\nЗатем послушайте вашего напарника, пересказывающего свой отрывок таким же образом.\n\nНе обсуждайте ваши пересказы - это только проговаривание и слушание.\n\n",
     "config": [
       {
@@ -1723,6 +1765,7 @@
     "time": 20,
     "whole_chapter": false,
     "count_of_users": 1,
+    "is_awaiting_team": false,
     "intro": "https://youtu.be/3RJQxjnxJ-I\n\nЭто индивидуальная работа и мы рекомендуем потратить на нее не более 20 минут.\n\n\n\nЦЕЛЬ этого шага: сделать первый набросок в первую очередь естественным языком.\n\n\n\nРОБ-Д + НАБРОСОК «ВСЛЕПУЮ» - Еще раз прочитайте ваш отрывок в ДОСЛОВНОМ ПЕРЕВОДЕ БИБЛИИ РОБ-Д (RLOB) и если вам необходимо, просмотрите все инструменты к этому отрывку. Как только вы будете готовы сделать «набросок», перейдите на панель «слепого» наброска и напишите ваш перевод на своем языке, используя максимально понятные и естественные слова вашего языка. Пишите по памяти. Не подглядывайте! Главная цель этого шага - естественность языка. Не бойтесь ошибаться! Ошибки на этом этапе допустимы. Точность перевода будет проверена на следующих шагах работы над текстом. \n\n",
     "config": [
       {
@@ -1771,6 +1814,7 @@
     "time": 30,
     "whole_chapter": false,
     "count_of_users": 1,
+    "is_awaiting_team": false,
     "intro": "https://youtu.be/WgvaOH9Lnpc\n\nЭто индивидуальная работа и мы рекомендуем потратить на нее не более 30 минут.\n\n\n\nЦЕЛЬ этого шага: поработать над ошибками в тексте и убедиться, что первый набросок перевода получился достаточно точным и естественным.\n\n\n\nПроверьте ваш перевод на ТОЧНОСТЬ, сравнив с текстом - ДОСЛОВНОГО ПЕРЕВОДА БИБЛИИ РОБ-Д (RLOB). При необходимости используйте все инструменты к переводу. Оцените по вопросам: ничего не добавлено, ничего не пропущено, смысл не изменён? Если есть ошибки, исправьте.\n\n\n\nПрочитайте ВОПРОСЫ и ответьте на них, глядя в свой текст. Сравните с ответами. Если есть ошибки в вашем тексте, исправьте.\n\n\n\nПосле этого прочитайте себе ваш перевод вслух и оцените - звучит ли ваш текст ПОНЯТНО И ЕСТЕСТВЕННО? Если нет, то исправьте.\n\n\n\nПерейдите к следующему вашему отрывку и повторите шаги Подготовка-Набросок-Проверка со всеми вашими отрывками до конца главы.\n\n",
     "config": [
       {
@@ -1835,6 +1879,7 @@
     "time": 40,
     "whole_chapter": false,
     "count_of_users": 2,
+    "is_awaiting_team": false,
     "intro": "https://youtu.be/xtgTo3oWxKs\n\nЭто работа в паре и мы рекомендуем потратить на нее не более 40 минут.\n\n\n\nЦЕЛЬ этого шага: улучшить набросок перевода, пригласив другого человека, чтобы проверить перевод на точность и естественность.\n\n\n\nПРОВЕРКА НА ТОЧНОСТЬ - Прочитайте вслух свой текст напарнику, который параллельно следит за текстом ДОСЛОВНОГО ПЕРЕВОДА БИБЛИИ РОБ-Д(RLOB) и обращает внимание только на ТОЧНОСТЬ перевода. \n\nОбсудите текст насколько он точен. \n\nИзменения в текст вносит переводчик, работавший над ним. Если не удалось договориться о каких-либо изменениях, оставьте этот вопрос для обсуждения всей командой.\n\nПоменяйтесь ролями и поработайте над отрывком партнёра.\n\n\n\nПРОВЕРКА НА ПОНЯТНОСТЬ и ЕСТЕСТВЕННОСТЬ - Еще раз прочитайте вслух свой текст напарнику, который теперь не смотрит ни в какой текст, а просто слушает ваше чтение вслух, обращая внимание на ПОНЯТНОСТЬ и ЕСТЕСТВЕННОСТЬ языка.\n\nОбсудите текст, помня о целевой аудитории и о КРАТКОМ ОПИСАНИИ ПЕРЕВОДА (Резюме к переводу). Если есть ошибки в вашем тексте, исправьте.\n\nПоменяйтесь ролями и поработайте над отрывком партнёра.\n\n\n\n\n\n_Примечание к шагу:_ \n\n- Не влюбляйтесь в свой текст. Будьте гибкими к тому, чтобы слышать другое мнение и улучшать свой набросок перевода.  Это групповая работа и текст должен соответствовать пониманию большинства в вашей команде. Если даже будут допущены ошибки в этом случае, то на проверках последующих уровней они будут исправлены.\n\n- Если в работе с напарником вам не удалось договориться по каким-то вопросам, касающихся текста, оставьте этот вопрос на обсуждение со всей командой. Ваша цель - не победить напарника, а с его помощью улучшить перевод.\n\n",
     "config": [
       {
@@ -1897,6 +1942,7 @@
     "time": 30,
     "whole_chapter": true,
     "count_of_users": 4,
+    "is_awaiting_team": false,
     "intro": "https://youtu.be/w5766JEVCyU\n\nЭто командная работа и мы рекомендуем потратить на нее не более 30 минут.\n\n\n\nЦЕЛЬ этого шага: всей командой улучшить перевод, выслушав больше мнений относительно самых важных слов и фраз в переводе, а также решить разногласия, оставшиеся после взаимопроверки.\n\n\n\nПРОВЕРКА ТЕКСТА ПО КЛЮЧЕВЫМ СЛОВАМ - Прочитайте текст всех переводчиков по очереди всей командой. Проверьте перевод на наличие ключевых слов из инструмента СЛОВА. Все ключевые слова на месте? Все ключевые слова переведены корректно?\n\nКоманда принимает решения, как переводить эти слова или фразы – переводчик вносит эти изменения в свой отрывок. В некоторых случаях, вносить изменения, которые принимает команда, может один человек, выбранный из переводчиков. \n\n",
     "config": [
       {
@@ -1962,6 +2008,7 @@
     "time": 60,
     "whole_chapter": true,
     "count_of_users": 4,
+    "is_awaiting_team": false,
     "intro": "https://youtu.be/EiVuJd9ijF0\n\nЭто командная работа и мы рекомендуем потратить на нее не более 60 минут.\n\nЦЕЛЬ этого шага: улучшить перевод, приняв решения командой о трудных словах или фразах, делая текст хорошим как с точки зрения точности, так и с точки зрения естественности. Это финальный шаг в работе над текстом.\n\n\n\nПРОВЕРКА НА ТОЧНОСТЬ - Прочитайте вслух свой текст команде. Команда в это время смотрит в текст ДОСЛОВНОГО ПЕРЕВОДА БИБЛИИ РОБ-Д (RLOB) и обращает внимание только на ТОЧНОСТЬ перевода. \n\nОбсудите текст насколько он точен. Если есть ошибки в вашем тексте, исправьте. Всей командой проверьте на точность работу каждого члена команды, каждую законченную главу.\n\n\n\nПрочитайте ВОПРОСЫ и ответьте на них, глядя в ваш текст. Сравните с ответами. Если есть ошибки в вашем тексте, исправьте.\n\n\n\nПРОВЕРКА НА ПОНЯТНОСТЬ и ЕСТЕСТВЕННОСТЬ - Еще раз прочитайте вслух свой текст команде, которая теперь не смотрит ни в какой текст, а просто слушает, обращая внимание на ПОНЯТНОСТЬ и ЕСТЕСТВЕННОСТЬ языка. Обсудите текст, помня о целевой аудитории и о КРАТКОМ ОПИСАНИИ ПЕРЕВОДА (Резюме к переводу). Если есть ошибки в вашем тексте, исправьте. Проработайте каждую главу/ каждый отрывок, пока команда не будет довольна результатом.\n\n\n\nПримечание к шагу: \n\n- Не оставляйте текст с несколькими вариантами перевода предложения или слова. После восьмого шага не должны оставаться нерешенные вопросы. Текст должен быть готовым к чтению. \n\n",
     "config": [
       {
@@ -2020,7 +2067,131 @@
       }
     ]
   }
-]', 'bible'::project_type),
+]', 'bible'::project_type,'[
+  {
+    "id": 1,
+    "block": [
+      {
+        "answer": "",
+        "question": "Как называется язык?"
+      },
+      {
+        "answer": "",
+        "question": "Какое межд.сокращение для языка?"
+      },
+      {
+        "answer": "",
+        "question": "Где распространён?"
+      },
+      {
+        "answer": "",
+        "question": "Почему выбран именно этот язык или диалект?"
+      },
+      {
+        "answer": "",
+        "question": "Какой алфавит используется в данном языке?"
+      }
+    ],
+    "title": "О языке",
+    "resume": ""
+  },
+  {
+    "id": 2,
+    "block": [
+      {
+        "answer": "",
+        "question": "Почему нужен этот перевод?"
+      },
+      {
+        "answer": "",
+        "question": "Какие переводы уже есть на этом языке?"
+      },
+      {
+        "answer": "",
+        "question": "Какие диалекты или другие языки могли бы пользоваться этим переводом?"
+      },
+      {
+        "answer": "",
+        "question": "Как вы думаете могут ли возникнуть трудности с другими командами, уже работающими над переводом библейского контента на этот язык?"
+      }
+    ],
+    "title": "О необходимости перевода",
+    "resume": ""
+  },
+  {
+    "id": 3,
+    "block": [
+      {
+        "answer": "",
+        "question": "кто будет пользоваться переводом?"
+      },
+      {
+        "answer": "",
+        "question": "На сколько человек в данной народности рассчитан этот перевод?"
+      },
+      {
+        "answer": "",
+        "question": "какие языки используют постоянно эти люди, кроме своего родного языка?"
+      },
+      {
+        "answer": "",
+        "question": "В этой народности больше мужчин/женщин, пожилых/молодых, грамотных/неграмотных?"
+      }
+    ],
+    "title": "О целевой аудитории перевода",
+    "resume": ""
+  },
+  {
+    "id": 4,
+    "block": [
+      {
+        "answer": "",
+        "question": "Какой будет тип перевода, смысловой или подстрочный (дословный, буквальный)?"
+      },
+      {
+        "answer": "",
+        "question": "Какой будет стиль языка у перевода?"
+      },
+      {
+        "answer": "",
+        "question": "Как будет распространяться перевод?"
+      }
+    ],
+    "title": "О стиле перевода",
+    "resume": ""
+  },
+  {
+    "id": 5,
+    "block": [
+      {
+        "answer": "",
+        "question": "Кто инициаторы перевода (кто проявил интерес к тому, чтобы начать работу над переводом)?"
+      },
+      {
+        "answer": "",
+        "question": "Кто будет работать над переводом?"
+      }
+    ],
+    "title": "О команде",
+    "resume": ""
+  },
+  {
+    "id": 6,
+    "block": [
+      {
+        "answer": "",
+        "question": "О будет оценивать перевод?"
+      },
+      {
+        "answer": "",
+        "question": "Как будет поддерживаться качество перевода?"
+      }
+    ],
+    "title": "О качестве перевода",
+    "resume": ""
+  }
+]'),
+
       ('CANA OBS', '{"obs":true, "tnotes":false, "twords":false, "tquestions":false}', '[
       {
         "title": "1 ШАГ - САМОСТОЯТЕЛЬНОЕ ИЗУЧЕНИЕ",
@@ -2028,6 +2199,7 @@
         "time": 60,
         "whole_chapter": true,
         "count_of_users": 1,
+        "is_awaiting_team": false,
         "intro": "https://www.youtube.com/watch?v=gxawAAQ9xbQ\n\nЭто индивидуальная работа и выполняется без участия других членов команды. Каждый читает материалы самостоятельно, не обсуждая прочитанное, но записывая свои комментарии. Если ваш проект по переводу ведется онлайн, то этот шаг можно выполнить до встречи с другими участниками команды переводчиков.\n\n\n\nЦЕЛЬ этого шага: понять общий смысл и цель книги, а также контекст (обстановку, время и место, любые факты, помогающие более точно перевести текст) и подготовиться к командному обсуждению текста перед тем, как начать перевод.\n\n\n\nЗАДАНИЯ ДЛЯ ПЕРВОГО ШАГА:\n\n\n\nВ этом шаге вам необходимо выполнить несколько заданий:\n\n\n\nИСТОРИЯ - Прочитайте историю (главу, над которой предстоит работа). Запишите для обсуждения командой предложения и слова, которые могут вызвать трудности при переводе или которые требуют особого внимания от переводчиков.\n\n\n\nОБЗОР ИНСТРУМЕНТА «СЛОВА» - Прочитайте СЛОВА к главе. Необходимо прочитать статьи к каждому слову. Отметьте для обсуждения командой статьи к словам, которые могут быть полезными для перевода Открытых Библейских Историй.\n\n\n\nОБЗОР ИНСТРУМЕНТА «ЗАМЕТКИ» - Прочитайте ЗАМЕТКИ к главе. Необходимо прочитать ЗАМЕТКИ к каждому отрывку. Отметьте для обсуждения командой ЗАМЕТКИ, которые могут быть полезными для перевода Открытых Библейских Историй.\n\n",
         "config": [
           {
@@ -2077,6 +2249,7 @@
         "time": 120,
         "whole_chapter": true,
         "count_of_users": 4,
+        "is_awaiting_team": false,
         "intro": "https://www.youtube.com/watch?v=HK6SXnU5zEw\n\nЭто командная работа и мы рекомендуем потратить на нее не более 60 минут.\n\n\n\nЦЕЛЬ этого шага: хорошо понять смысл текста и слов всей командой, а также принять командное решение по переводу некоторых слов перед тем, как начать основную работу.\n\n\n\nЗАДАНИЯ ДЛЯ ВТОРОГО ШАГА:\n\n\n\nВ этом шаге вам необходимо выполнить несколько заданий.\n\n\n\nИСТОРИЯ - Прочитайте вслух историю(главу, над которой предстоит работа). Обсудите предложения и слова, которые могут вызвать трудности при переводе или которые требуют особого внимания от переводчиков. Уделите этому этапу 20 минут.\n\n\n\nОБЗОР ИНСТРУМЕНТА «СЛОВА» - Обсудите инструмент СЛОВА. Что полезного для перевода вы нашли в этих статьях? Используйте свои комментарии с самостоятельного изучения. Уделите этому этапу 20 минут.\n\n\n\nОБЗОР ИНСТРУМЕНТА «ЗАМЕТКИ» - Обсудите инструмент ЗАМЕТКИ. Что полезного для перевода вы нашли в ЗАМЕТКАХ. Используйте свои комментарии по этому инструменту с самостоятельного изучения. Уделите этому этапу 20 минут.\n\n",
         "config": [
           {
@@ -2126,6 +2299,7 @@
         "time": 30,
         "whole_chapter": false,
         "count_of_users": 2,
+        "is_awaiting_team": false,
         "intro": "https://www.youtube.com/watch?v=jlhwA9SIWXQ\n\nЭто работа в паре и мы рекомендуем потратить на нее не более 20 минут.\n\n\n\nЦЕЛЬ этого шага: подготовиться к переводу текста естественным языком.\n\n\n\nВ этом шаге вам необходимо выполнить два задания.\n\n\n\nПервое задание - ПЕРЕСКАЗ НА РУССКОМ - Прочитайте ваш отрывок из главы в ОТКРЫТЫХ БИБЛЕЙСКИХ ИСТОРИЯХ. Если необходимо - изучите отрывок вместе со всеми инструментами, чтобы как можно лучше понять этот текст. Перескажите смысл отрывка своему напарнику, используя максимально понятные и естественные слова русского языка. Не старайтесь пересказывать в точности исходный текст. Перескажите текст в максимальной для себя простоте.\n\nПосле этого послушайте вашего напарника, пересказывающего свой отрывок.\n\nУделите этому этапу 10 минут.\n\nНе обсуждайте ваши пересказы. В этом шаге только проговаривание текста и слушание.\n\n\n\nВторое задание - ПЕРЕСКАЗ НА ЦЕЛЕВОМ - Еще раз просмотрите ваш отрывок или главу в ОТКРЫТЫХ БИБЛЕЙСКИХ ИСТОРИЯХ, и подумайте, как пересказать этот текст на языке, на который делается перевод, помня о КРАТКОМ ОПИСАНИИ ПЕРЕВОДА (Резюме к переводу) и о стиле языка. \n\nПерескажите ваш отрывок напарнику на целевом языке, используя максимально понятные и естественные слова этого языка. Передайте всё, что вы запомнили, не подглядывая в текст. \n\nЗатем послушайте вашего напарника, пересказывающего свой отрывок таким же образом.\n\nУделите этому этапу 10 минут.\n\nНе обсуждайте ваши пересказы. В этом шаге только проговаривание текста и слушание.\n\n",
         "config": [
           {
@@ -2162,6 +2336,7 @@
         "time": 20,
         "whole_chapter": false,
         "count_of_users": 1,
+        "is_awaiting_team": false,
         "intro": "https://www.youtube.com/watch?v=HVXOiKUsXSI\n\nЭто индивидуальная работа и мы рекомендуем потратить на нее не более 20 минут.\n\n\n\nЦЕЛЬ этого шага: сделать первый набросок естественным языком.\n\n\n\nЕще раз прочитайте ваш отрывок  или главу в ОТКРЫТЫХ БИБЛЕЙСКИХ ИСТОРИЯХ. Если вам необходимо, просмотрите все инструменты к этому отрывку. Как только вы будете готовы сделать «набросок», перейдите на панель «слепого» наброска в программе Translation Studio или в другой программе, в которой вы работаете и напишите ваш перевод на своем языке, используя максимально понятные и естественные слова вашего языка. Пишите по памяти. Не подглядывайте!\n\nГлавная цель этого шага - естественность языка. Не бойтесь ошибаться! Ошибки на этом этапе допустимы. Точность перевода будет проверена на следующих шагах работы над текстом.\n\n",
         "config": [
           {
@@ -2200,6 +2375,7 @@
         "time": 30,
         "whole_chapter": false,
         "count_of_users": 1,
+        "is_awaiting_team": false,
         "intro": "https://www.youtube.com/watch?v=p3p8c_K-O3c\n\nЭто индивидуальная работа и мы рекомендуем потратить на нее не более 30 минут.\n\n\n\nЦЕЛЬ этого шага: поработать над ошибками в тексте и убедиться, что первый набросок перевода получился достаточно точным и естественным. \n\n\n\nВ этом шаге вам необходимо выполнить три задания.\n\n\n\nЗадание первое. Проверьте ваш перевод на ТОЧНОСТЬ, сравнив с текстом ОТКРЫТЫХ БИБЛЕЙСКИХ ИСТОРИЙ на русском языке. При необходимости используйте все инструменты к переводу. Оцените по вопросам: ничего не добавлено, ничего не пропущено, смысл не изменён? Если есть ошибки, исправьте. Уделите этому заданию 10 минут.\n\n\n\nЗадание второе. Прочитайте ВОПРОСЫ и ответьте на них, глядя в свой текст. Сравните с ответами. Если есть ошибки в вашем тексте, исправьте. Уделите этому заданию 10 минут.\n\n\n\nЗадание третье. Прочитайте себе ваш перевод вслух и оцените - звучит ли ваш текст ПОНЯТНО И ЕСТЕСТВЕННО? Если нет, то исправьте. Уделите этому заданию 10 минут.\n\n",
         "config": [
           {
@@ -2254,6 +2430,7 @@
         "time": 40,
         "whole_chapter": false,
         "count_of_users": 2,
+        "is_awaiting_team": false,
         "intro": "https://www.youtube.com/watch?v=cAgypQsWgQk\n\nЭто работа в паре и мы рекомендуем потратить на нее не более 40 минут.\n\n\n\nЦЕЛЬ этого шага: улучшить набросок перевода, пригласив другогого человека, чтобы проверить перевод на точность и естественность.\n\n\n\nВ этом шаге вам необходимо выполнить два задания.\n\n\n\nЗадание первое - Прочитайте вслух свой текст напарнику, который параллельно следит за текстом ОТКРЫТЫХ БИБЛЕЙСКИХ ИСТОРИЙ на русском языке и обращает внимание только на ТОЧНОСТЬ вашего перевода.\n\nОбсудите текст насколько он точен.\n\nИзменения в текст вносит переводчик, работавший над ним. Если не удалось договориться о каких-либо изменениях, оставьте этот вопрос для обсуждения всей командой.\n\nПоменяйтесь ролями и поработайте над отрывком партнёра.\n\nУделите этому заданию 20 минут.\n\n\n\nЗадание второе - Еще раз прочитайте вслух свой текст напарнику, который теперь не смотрит ни в какой текст, а просто слушает ваше чтение вслух, обращая внимание на ПОНЯТНОСТЬ и ЕСТЕСТВЕННОСТЬ языка.\n\nОбсудите текст, помня о целевой аудитории и о КРАТКОМ ОПИСАНИИ ПЕРЕВОДА (Резюме к переводу). Если есть ошибки в вашем тексте, исправьте.\n\nПоменяйтесь ролями и поработайте над отрывком партнёра.\n\nУделите этому заданию 20 минут.\n\n\n\n\n\n_Примечание к шагу:_ \n\n- Не влюбляйтесь в свой текст. Будьте гибкими к тому, чтобы слышать другое мнение и улучшать свой набросок перевода.  Это групповая работа и текст должен соответствовать пониманию большинства в вашей команде. Если даже будут допущены ошибки в этом случае, то на проверках последующих уровней они будут исправлены.\n\n- Если в работе с напарником вам не удалось договориться по каким-то вопросам, касающихся текста, оставьте этот вопрос на обсуждение со всей командой. Ваша цель - не победить напарника, а с его помощью улучшить перевод.\n\n",
         "config": [
           {
@@ -2306,6 +2483,7 @@
         "time": 30,
         "whole_chapter": true,
         "count_of_users": 4,
+        "is_awaiting_team": false,
         "intro": "https://www.youtube.com/watch?v=P2MbEKDw8U4\n\nЭто командная работа и мы рекомендуем потратить на нее не более 60 минут.\n\n\n\nЦЕЛЬ этого шага: улучшить перевод, приняв решения командой о трудных словах или фразах, делая текст хорошим как с точки зрения точности, так и с точки зрения естественности. Это финальный шаг в работе над текстом.\n\n\n\nВ этом шаге вам необходимо выполнить три задания.\n\n\n\nЗадание первое - Прочитайте вслух свой текст команде. Команда в это время смотрит в текст ОТКРЫТЫХ БИБЛЕЙСКИХ ИСТОРИЙ на русском языке и обращает внимание только на ТОЧНОСТЬ вашего перевода.\n\nОбсудите текст насколько он точен. Если есть ошибки в вашем тексте, исправьте. Всей командой проверьте на точность работу каждого члена команды. Уделите этому заданию 20 минут.\n\n\n\nЗадание второе - Проверьте вместе с командой ваш перевод на наличие ключевых слов из инструмента СЛОВА. Все ключевые слова на месте? Все ключевые слова переведены корректно? Уделите этому заданию 20 минут.\n\n\n\nЗадание третье - Еще раз прочитайте вслух свой текст команде, которая теперь не смотрит ни в какой текст, а просто слушает, обращая внимание на ПОНЯТНОСТЬ и ЕСТЕСТВЕННОСТЬ языка. Обсудите текст, помня о целевой аудитории и о КРАТКОМ ОПИСАНИИ ПЕРЕВОДА (Резюме к переводу). Если есть ошибки в вашем тексте, исправьте. Проработайте каждую главу/ каждый отрывок, пока команда не будет довольна результатом. Уделите этому заданию 20 минут.\n\n\n\n\n\n_Примечание к шагу:_ \n\n- Не оставляйте текст с несколькими вариантами перевода предложения или слова. После седьмого шага не должны оставаться нерешенные вопросы. Текст должен быть готовым к чтению.\n\n",
         "config": [
           {
@@ -2359,13 +2537,137 @@
           }
         ]
       }
-    ]', 'obs'::project_type),('CANA Bible','{"simplified":false, "literal":true,"reference":false, "tnotes":false, "twords":false, "tquestions":false}','[
+    ]', 'obs'::project_type,'[
+  {
+    "id": 1,
+    "block": [
+      {
+        "answer": "",
+        "question": "Как называется язык?"
+      },
+      {
+        "answer": "",
+        "question": "Какое межд.сокращение для языка?"
+      },
+      {
+        "answer": "",
+        "question": "Где распространён?"
+      },
+      {
+        "answer": "",
+        "question": "Почему выбран именно этот язык или диалект?"
+      },
+      {
+        "answer": "",
+        "question": "Какой алфавит используется в данном языке?"
+      }
+    ],
+    "title": "О языке",
+    "resume": ""
+  },
+  {
+    "id": 2,
+    "block": [
+      {
+        "answer": "",
+        "question": "Почему нужен этот перевод?"
+      },
+      {
+        "answer": "",
+        "question": "Какие переводы уже есть на этом языке?"
+      },
+      {
+        "answer": "",
+        "question": "Какие диалекты или другие языки могли бы пользоваться этим переводом?"
+      },
+      {
+        "answer": "",
+        "question": "Как вы думаете могут ли возникнуть трудности с другими командами, уже работающими над переводом библейского контента на этот язык?"
+      }
+    ],
+    "title": "О необходимости перевода",
+    "resume": ""
+  },
+  {
+    "id": 3,
+    "block": [
+      {
+        "answer": "",
+        "question": "кто будет пользоваться переводом?"
+      },
+      {
+        "answer": "",
+        "question": "На сколько человек в данной народности рассчитан этот перевод?"
+      },
+      {
+        "answer": "",
+        "question": "какие языки используют постоянно эти люди, кроме своего родного языка?"
+      },
+      {
+        "answer": "",
+        "question": "В этой народности больше мужчин/женщин, пожилых/молодых, грамотных/неграмотных?"
+      }
+    ],
+    "title": "О целевой аудитории перевода",
+    "resume": ""
+  },
+  {
+    "id": 4,
+    "block": [
+      {
+        "answer": "",
+        "question": "Какой будет тип перевода, смысловой или подстрочный (дословный, буквальный)?"
+      },
+      {
+        "answer": "",
+        "question": "Какой будет стиль языка у перевода?"
+      },
+      {
+        "answer": "",
+        "question": "Как будет распространяться перевод?"
+      }
+    ],
+    "title": "О стиле перевода",
+    "resume": ""
+  },
+  {
+    "id": 5,
+    "block": [
+      {
+        "answer": "",
+        "question": "Кто инициаторы перевода (кто проявил интерес к тому, чтобы начать работу над переводом)?"
+      },
+      {
+        "answer": "",
+        "question": "Кто будет работать над переводом?"
+      }
+    ],
+    "title": "О команде",
+    "resume": ""
+  },
+  {
+    "id": 6,
+    "block": [
+      {
+        "answer": "",
+        "question": "О будет оценивать перевод?"
+      },
+      {
+        "answer": "",
+        "question": "Как будет поддерживаться качество перевода?"
+      }
+    ],
+    "title": "О качестве перевода",
+    "resume": ""
+  }
+]'),('CANA Bible','{"simplified":false, "literal":true,"reference":false, "tnotes":false, "twords":false, "tquestions":false}','[
   {
     "title": "1 ШАГ - ОБЗОР КНИГИ",
     "description": "Это индивидуальная работа и выполняется до встречи с другими участниками команды КРАШ-ТЕСТА.\n\n\n\nЦЕЛЬ этого шага для КОРРЕКТОРА МАТЕРИАЛОВ: убедиться, что материалы букпэкеджа подготовлены корректно и не содержат ошибок или каких-либо трудностей для использования переводчиками.\n\nЦЕЛЬ этого шага для ТЕСТОВОГО ПЕРЕВОДЧИКА: понять общий смысл и цель книги, а также контекст (обстановку, время и место, любые факты, помогающие более точно перевести текст) и подготовиться к командному обсуждению текста перед тем, как начать перевод.\n\n\n\n\n\nОБЩИЙ ОБЗОР К КНИГЕ\n\nПрочитайте общий обзор к книге. Запишите для обсуждения командой предложения, которые могут вызвать трудности при переводе или которые требуют особого внимания от переводчиков. Также отметьте найденные ошибки или неточности в общем обзоре к книге.\n\nЭто задание выполняется только при работе над первой главой. При работе над другими главами книги возвращаться к общему обзору книги не нужно. \n\n\n\nОБЗОР К ГЛАВЕ\n\nПрочитайте обзор к главе. Запишите для обсуждения командой предложения, которые могут вызвать трудности при переводе или которые требуют особого внимания от переводчиков. Также отметьте найденные ошибки или неточности в обзоре к главе.\n\n\n\nЧТЕНИЕ ДОСЛОВНОЙ БИБЛИИ РОБ-Д (RLOB)\n\nПрочитайте ГЛАВУ ДОСЛОВНОЙ БИБЛИИ. Запишите для обсуждения командой предложения, которые могут вызвать трудности при переводе или которые требуют особого внимания от переводчиков. Также отметьте найденные ошибки или неточности в этом инструменте.\n\n\n\nЧТЕНИЕ СМЫСЛОВОЙ БИБЛИИ РОБ-С (RSOB)\n\nПрочитайте ГЛАВУ СМЫСЛОВОЙ БИБЛИИ. Запишите для обсуждения командой предложения, которые могут вызвать трудности при переводе или которые требуют особого внимания от переводчиков. Также отметьте найденные ошибки или неточности в этом инструменте.\n\n\n\nОБЗОР ИНСТРУМЕНТА «СЛОВА»\n\nПрочитайте СЛОВА к главе. Необходимо прочитать статьи к каждому слову. Отметьте для обсуждения командой статьи к словам, которые могут быть полезными для перевода Писания. Также отметьте найденные ошибки или неточности в этом инструменте.\n\n\n\nОБЗОР ИНСТРУМЕНТА «ЗАМЕТКИ»\n\nПрочитайте ЗАМЕТКИ к главе. Необходимо прочитать ЗАМЕТКИ к каждому отрывку. Отметьте для обсуждения командой ЗАМЕТКИ, которые могут быть полезными для перевода Писания. Также отметьте найденные ошибки или неточности в этом инструменте.",
     "time": 60,
     "whole_chapter": true,
     "count_of_users": 1,
+    "is_awaiting_team": false,
     "intro": "https://youtu.be/IAxFRRy5qw8\n\nЭто индивидуальная работа и выполняется до встречи с другими участниками команды КРАШ-ТЕСТА.\n\n\n\nЦЕЛЬ этого шага для КОРРЕКТОРА МАТЕРИАЛОВ: убедиться, что материалы букпэкеджа подготовлены корректно и не содержат ошибок или каких-либо трудностей для использования переводчиками.\n\nЦЕЛЬ этого шага для ТЕСТОВОГО ПЕРЕВОДЧИКА: понять общий смысл и цель книги, а также контекст (обстановку, время и место, любые факты, помогающие более точно перевести текст) и подготовиться к командному обсуждению текста перед тем, как начать перевод.\n\n\n\n\n\nОБЩИЙ ОБЗОР К КНИГЕ\n\nПрочитайте общий обзор к книге. Запишите для обсуждения командой предложения, которые могут вызвать трудности при переводе или которые требуют особого внимания от переводчиков. Также отметьте найденные ошибки или неточности в общем обзоре к книге.\n\nЭто задание выполняется только при работе над первой главой. При работе над другими главами книги возвращаться к общему обзору книги не нужно. \n\n\n\nОБЗОР К ГЛАВЕ\n\nПрочитайте обзор к главе. Запишите для обсуждения командой предложения, которые могут вызвать трудности при переводе или которые требуют особого внимания от переводчиков. Также отметьте найденные ошибки или неточности в обзоре к главе.\n\n\n\nЧТЕНИЕ ДОСЛОВНОЙ БИБЛИИ РОБ-Д (RLOB)\n\nПрочитайте ГЛАВУ ДОСЛОВНОЙ БИБЛИИ. Запишите для обсуждения командой предложения, которые могут вызвать трудности при переводе или которые требуют особого внимания от переводчиков. Также отметьте найденные ошибки или неточности в этом инструменте.\n\n\n\nЧТЕНИЕ СМЫСЛОВОЙ БИБЛИИ РОБ-С (RSOB)\n\nПрочитайте ГЛАВУ СМЫСЛОВОЙ БИБЛИИ. Запишите для обсуждения командой предложения, которые могут вызвать трудности при переводе или которые требуют особого внимания от переводчиков. Также отметьте найденные ошибки или неточности в этом инструменте.\n\n\n\nОБЗОР ИНСТРУМЕНТА «СЛОВА»\n\nПрочитайте СЛОВА к главе. Необходимо прочитать статьи к каждому слову. Отметьте для обсуждения командой статьи к словам, которые могут быть полезными для перевода Писания. Также отметьте найденные ошибки или неточности в этом инструменте.\n\n\n\nОБЗОР ИНСТРУМЕНТА «ЗАМЕТКИ»\n\nПрочитайте ЗАМЕТКИ к главе. Необходимо прочитать ЗАМЕТКИ к каждому отрывку. Отметьте для обсуждения командой ЗАМЕТКИ, которые могут быть полезными для перевода Писания. Также отметьте найденные ошибки или неточности в этом инструменте.",
     "config": [
       {
@@ -2425,6 +2727,7 @@
     "time": 120,
     "whole_chapter": true,
     "count_of_users": 4,
+    "is_awaiting_team": false,
     "intro": "https://youtu.be/d6kvUVRttUw\n\nЭто командная работа и мы рекомендуем потратить на нее не более 120 минут.\n\n\n\nЦЕЛЬ этого шага для КОРРЕКТОРА МАТЕРИАЛОВ: обсудить с командой материалы букпэкеджа. Для этого поделитесь заметками, которые вы сделали при индивидуальной работе. Обсудите все предложенные правки по инструментам букпэкеджа. Запишите командное резюме по ним для передачи команде, работающей над букпэкеджом.\n\nЦЕЛЬ этого шага для ТЕСТОВОГО ПЕРЕВОДЧИКА: обсудить командой общий смысл и цель книги, а также контекст (обстановку, время и место, любые факты, помогающие более точно перевести текст) и подготовиться к началу перевода.\n\n\n\n\n\nОБЩИЙ ОБЗОР К КНИГЕ - Обсудите ОБЩИЙ ОБЗОР К КНИГЕ. Что полезного для перевода вы нашли в этих статьях? Используйте свои заметки с самостоятельного изучения этого инструмента. Также обсудите найденные ошибки или неточности в общем обзоре к книге. Уделите этому этапу 10 минут.\n\nЭто задание выполняется только при работе над первой главой. При работе над другими главами книги возвращаться к общему обзору книги не нужно.\n\n\n\nОБЗОР К ГЛАВЕ - Обсудите ОБЗОР К ГЛАВЕ. Что полезного для перевода вы нашли в этих статьях? Используйте свои заметки с самостоятельного изучения. Также обсудите найденные ошибки или неточности в общем обзоре к главе. Уделите этому этапу 10 минут.\n\n\n\nЧТЕНИЕ РОБ-Д (RLOB) - Прочитайте вслух ГЛАВУ ДОСЛОВНОГО ПЕРЕВОДА БИБЛИИ РОБ-Д (RLOB). Обсудите предложения, которые могут вызвать трудности при переводе или которые требуют особого внимания от переводчиков. Используйте свои заметки с самостоятельного изучения этого перевода. Уделите этому этапу 20 мин.\n\n\n\nЧТЕНИЕ РОБ-С (RSOB) - Прочитайте вслух ГЛАВУ СМЫСЛОВОГО ПЕРЕВОДА БИБЛИИ РОБ-С (RSOB). Обсудите предложения, которые могут вызвать трудности при переводе или которые требуют особого внимания от переводчиков. Используйте свои заметки с самостоятельного изучения этого перевода. Уделите этому этапу 10 мин.\n\n\n\nОБЗОР ИНСТРУМЕНТА «СЛОВА» - Обсудите инструмент СЛОВА. Что полезного для перевода вы нашли в этих статьях? Используйте свои заметки с самостоятельного изучения. Также обсудите найденные ошибки или неточности в статьях этого инструмента. Уделите этому этапу 60 минут.\n\n\n\nОБЗОР ИНСТРУМЕНТА «ЗАМЕТКИ» - Обсудите инструмент ЗАМЕТКИ. Что полезного для перевода вы нашли в ЗАМЕТКАХ. Используйте свои записи по этому инструменту с самостоятельного изучения. Также обсудите найденные ошибки или неточности в этом инструменте. Уделите этому этапу 10 минут.\n\n",
     "config": [
       {
@@ -2484,6 +2787,7 @@
     "time": 30,
     "whole_chapter": false,
     "count_of_users": 2,
+    "is_awaiting_team": false,
     "intro": "https://youtu.be/ujMGcdkGGhI\n\nЭто работа в паре и мы рекомендуем потратить на нее не более 30 минут.\n\n\n\nЦЕЛЬ этого шага: подготовиться к переводу текста естественным языком.\n\nВ этом шаге вам необходимо выполнить два задания.\n\n\n\nПЕРЕСКАЗ НА РУССКОМ - Прочитайте ваш отрывок в ДОСЛОВНОМ ПЕРЕВОДЕ БИБЛИИ РОБ-Д (RLOB). Если необходимо - изучите отрывок вместе со всеми инструментами, чтобы как можно лучше передать этот текст более естественным русским языком. Перескажите смысл отрывка своему напарнику, используя максимально понятные и естественные слова русского языка. Не старайтесь пересказывать в точности исходный текст ДОСЛОВНОГО ПЕРЕВОДА. Перескажите текст в максимальной для себя простоте.\n\nПосле этого послушайте вашего напарника, пересказывающего свой отрывок. \n\nНе обсуждайте ваши пересказы - это только проговаривание и слушание.\n\n\n\nПЕРЕСКАЗ НА ЦЕЛЕВОМ - Еще раз просмотрите ваш отрывок в ДОСЛОВНОМ ПЕРЕВОДЕ БИБЛИИ РОБ-Д (RLOB) и подумайте, как пересказать этот текст на языке, на который делается перевод, помня о Резюме к переводу о стиле языка. \n\nПерескажите ваш отрывок напарнику на целевом языке, используя максимально понятные и естественные слова этого языка. Передайте всё, что вы запомнили, не подглядывая в текст. \n\nЗатем послушайте вашего напарника, пересказывающего свой отрывок таким же образом.\n\nНе обсуждайте ваши пересказы - это только проговаривание и слушание.\n\n",
     "config": [
       {
@@ -2530,6 +2834,7 @@
     "time": 20,
     "whole_chapter": false,
     "count_of_users": 1,
+    "is_awaiting_team": false,
     "intro": "https://youtu.be/3RJQxjnxJ-I\n\nЭто индивидуальная работа и мы рекомендуем потратить на нее не более 20 минут.\n\n\n\nЦЕЛЬ этого шага: сделать первый набросок в первую очередь естественным языком.\n\n\n\nРОБ-Д + НАБРОСОК «ВСЛЕПУЮ» - Еще раз прочитайте ваш отрывок в ДОСЛОВНОМ ПЕРЕВОДЕ БИБЛИИ РОБ-Д (RLOB) и если вам необходимо, просмотрите все инструменты к этому отрывку. Как только вы будете готовы сделать «набросок», перейдите на панель «слепого» наброска и напишите ваш перевод на своем языке, используя максимально понятные и естественные слова вашего языка. Пишите по памяти. Не подглядывайте! Главная цель этого шага - естественность языка. Не бойтесь ошибаться! Ошибки на этом этапе допустимы. Точность перевода будет проверена на следующих шагах работы над текстом. \n\n",
     "config": [
       {
@@ -2578,6 +2883,7 @@
     "time": 30,
     "whole_chapter": false,
     "count_of_users": 1,
+    "is_awaiting_team": false,
     "intro": "https://youtu.be/WgvaOH9Lnpc\n\nЭто индивидуальная работа и мы рекомендуем потратить на нее не более 30 минут.\n\n\n\nЦЕЛЬ этого шага: поработать над ошибками в тексте и убедиться, что первый набросок перевода получился достаточно точным и естественным.\n\n\n\nПроверьте ваш перевод на ТОЧНОСТЬ, сравнив с текстом - ДОСЛОВНОГО ПЕРЕВОДА БИБЛИИ РОБ-Д (RLOB). При необходимости используйте все инструменты к переводу. Оцените по вопросам: ничего не добавлено, ничего не пропущено, смысл не изменён? Если есть ошибки, исправьте.\n\n\n\nПрочитайте ВОПРОСЫ и ответьте на них, глядя в свой текст. Сравните с ответами. Если есть ошибки в вашем тексте, исправьте.\n\n\n\nПосле этого прочитайте себе ваш перевод вслух и оцените - звучит ли ваш текст ПОНЯТНО И ЕСТЕСТВЕННО? Если нет, то исправьте.\n\n\n\nПерейдите к следующему вашему отрывку и повторите шаги Подготовка-Набросок-Проверка со всеми вашими отрывками до конца главы.\n\n",
     "config": [
       {
@@ -2642,6 +2948,7 @@
     "time": 40,
     "whole_chapter": false,
     "count_of_users": 2,
+    "is_awaiting_team": false,
     "intro": "https://youtu.be/xtgTo3oWxKs\n\nЭто работа в паре и мы рекомендуем потратить на нее не более 40 минут.\n\n\n\nЦЕЛЬ этого шага: улучшить набросок перевода, пригласив другого человека, чтобы проверить перевод на точность и естественность.\n\n\n\nПРОВЕРКА НА ТОЧНОСТЬ - Прочитайте вслух свой текст напарнику, который параллельно следит за текстом ДОСЛОВНОГО ПЕРЕВОДА БИБЛИИ РОБ-Д(RLOB) и обращает внимание только на ТОЧНОСТЬ перевода. \n\nОбсудите текст насколько он точен. \n\nИзменения в текст вносит переводчик, работавший над ним. Если не удалось договориться о каких-либо изменениях, оставьте этот вопрос для обсуждения всей командой.\n\nПоменяйтесь ролями и поработайте над отрывком партнёра.\n\n\n\nПРОВЕРКА НА ПОНЯТНОСТЬ и ЕСТЕСТВЕННОСТЬ - Еще раз прочитайте вслух свой текст напарнику, который теперь не смотрит ни в какой текст, а просто слушает ваше чтение вслух, обращая внимание на ПОНЯТНОСТЬ и ЕСТЕСТВЕННОСТЬ языка.\n\nОбсудите текст, помня о целевой аудитории и о КРАТКОМ ОПИСАНИИ ПЕРЕВОДА (Резюме к переводу). Если есть ошибки в вашем тексте, исправьте.\n\nПоменяйтесь ролями и поработайте над отрывком партнёра.\n\n\n\n\n\n_Примечание к шагу:_ \n\n- Не влюбляйтесь в свой текст. Будьте гибкими к тому, чтобы слышать другое мнение и улучшать свой набросок перевода.  Это групповая работа и текст должен соответствовать пониманию большинства в вашей команде. Если даже будут допущены ошибки в этом случае, то на проверках последующих уровней они будут исправлены.\n\n- Если в работе с напарником вам не удалось договориться по каким-то вопросам, касающихся текста, оставьте этот вопрос на обсуждение со всей командой. Ваша цель - не победить напарника, а с его помощью улучшить перевод.\n\n",
     "config": [
       {
@@ -2704,6 +3011,7 @@
     "time": 30,
     "whole_chapter": true,
     "count_of_users": 4,
+    "is_awaiting_team": false,
     "intro": "https://youtu.be/w5766JEVCyU\n\nЭто командная работа и мы рекомендуем потратить на нее не более 30 минут.\n\n\n\nЦЕЛЬ этого шага: всей командой улучшить перевод, выслушав больше мнений относительно самых важных слов и фраз в переводе, а также решить разногласия, оставшиеся после взаимопроверки.\n\n\n\nПРОВЕРКА ТЕКСТА ПО КЛЮЧЕВЫМ СЛОВАМ - Прочитайте текст всех переводчиков по очереди всей командой. Проверьте перевод на наличие ключевых слов из инструмента СЛОВА. Все ключевые слова на месте? Все ключевые слова переведены корректно?\n\nКоманда принимает решения, как переводить эти слова или фразы – переводчик вносит эти изменения в свой отрывок. В некоторых случаях, вносить изменения, которые принимает команда, может один человек, выбранный из переводчиков. \n\n",
     "config": [
       {
@@ -2769,6 +3077,7 @@
     "time": 60,
     "whole_chapter": true,
     "count_of_users": 4,
+    "is_awaiting_team": false,
     "intro": "https://youtu.be/EiVuJd9ijF0\n\nЭто командная работа и мы рекомендуем потратить на нее не более 60 минут.\n\nЦЕЛЬ этого шага: улучшить перевод, приняв решения командой о трудных словах или фразах, делая текст хорошим как с точки зрения точности, так и с точки зрения естественности. Это финальный шаг в работе над текстом.\n\n\n\nПРОВЕРКА НА ТОЧНОСТЬ - Прочитайте вслух свой текст команде. Команда в это время смотрит в текст ДОСЛОВНОГО ПЕРЕВОДА БИБЛИИ РОБ-Д (RLOB) и обращает внимание только на ТОЧНОСТЬ перевода. \n\nОбсудите текст насколько он точен. Если есть ошибки в вашем тексте, исправьте. Всей командой проверьте на точность работу каждого члена команды, каждую законченную главу.\n\n\n\nПрочитайте ВОПРОСЫ и ответьте на них, глядя в ваш текст. Сравните с ответами. Если есть ошибки в вашем тексте, исправьте.\n\n\n\nПРОВЕРКА НА ПОНЯТНОСТЬ и ЕСТЕСТВЕННОСТЬ - Еще раз прочитайте вслух свой текст команде, которая теперь не смотрит ни в какой текст, а просто слушает, обращая внимание на ПОНЯТНОСТЬ и ЕСТЕСТВЕННОСТЬ языка. Обсудите текст, помня о целевой аудитории и о КРАТКОМ ОПИСАНИИ ПЕРЕВОДА (Резюме к переводу). Если есть ошибки в вашем тексте, исправьте. Проработайте каждую главу/ каждый отрывок, пока команда не будет довольна результатом.\n\n\n\nПримечание к шагу: \n\n- Не оставляйте текст с несколькими вариантами перевода предложения или слова. После восьмого шага не должны оставаться нерешенные вопросы. Текст должен быть готовым к чтению. \n\n",
     "config": [
       {
@@ -2827,7 +3136,451 @@
       }
     ]
   }
-]','bible'::project_type);
+]','bible'::project_type,'[
+  {
+    "id": 1,
+    "block": [
+      {
+        "answer": "",
+        "question": "Как называется язык?"
+      },
+      {
+        "answer": "",
+        "question": "Какое межд.сокращение для языка?"
+      },
+      {
+        "answer": "",
+        "question": "Где распространён?"
+      },
+      {
+        "answer": "",
+        "question": "Почему выбран именно этот язык или диалект?"
+      },
+      {
+        "answer": "",
+        "question": "Какой алфавит используется в данном языке?"
+      }
+    ],
+    "title": "О языке",
+    "resume": ""
+  },
+  {
+    "id": 2,
+    "block": [
+      {
+        "answer": "",
+        "question": "Почему нужен этот перевод?"
+      },
+      {
+        "answer": "",
+        "question": "Какие переводы уже есть на этом языке?"
+      },
+      {
+        "answer": "",
+        "question": "Какие диалекты или другие языки могли бы пользоваться этим переводом?"
+      },
+      {
+        "answer": "",
+        "question": "Как вы думаете могут ли возникнуть трудности с другими командами, уже работающими над переводом библейского контента на этот язык?"
+      }
+    ],
+    "title": "О необходимости перевода",
+    "resume": ""
+  },
+  {
+    "id": 3,
+    "block": [
+      {
+        "answer": "",
+        "question": "кто будет пользоваться переводом?"
+      },
+      {
+        "answer": "",
+        "question": "На сколько человек в данной народности рассчитан этот перевод?"
+      },
+      {
+        "answer": "",
+        "question": "какие языки используют постоянно эти люди, кроме своего родного языка?"
+      },
+      {
+        "answer": "",
+        "question": "В этой народности больше мужчин/женщин, пожилых/молодых, грамотных/неграмотных?"
+      }
+    ],
+    "title": "О целевой аудитории перевода",
+    "resume": ""
+  },
+  {
+    "id": 4,
+    "block": [
+      {
+        "answer": "",
+        "question": "Какой будет тип перевода, смысловой или подстрочный (дословный, буквальный)?"
+      },
+      {
+        "answer": "",
+        "question": "Какой будет стиль языка у перевода?"
+      },
+      {
+        "answer": "",
+        "question": "Как будет распространяться перевод?"
+      }
+    ],
+    "title": "О стиле перевода",
+    "resume": ""
+  },
+  {
+    "id": 5,
+    "block": [
+      {
+        "answer": "",
+        "question": "Кто инициаторы перевода (кто проявил интерес к тому, чтобы начать работу над переводом)?"
+      },
+      {
+        "answer": "",
+        "question": "Кто будет работать над переводом?"
+      }
+    ],
+    "title": "О команде",
+    "resume": ""
+  },
+  {
+    "id": 6,
+    "block": [
+      {
+        "answer": "",
+        "question": "О будет оценивать перевод?"
+      },
+      {
+        "answer": "",
+        "question": "Как будет поддерживаться качество перевода?"
+      }
+    ],
+    "title": "О качестве перевода",
+    "resume": ""
+  }
+]'),  ('RuGL','{"simplified":true, "literal":false, "tnotes":false, "twords":false}','[
+  {
+    "time": 60,
+    "intro": "Описание шага",
+    "title": "1 ШАГ",
+    "config": [
+      {
+        "size": 2,
+        "tools": [
+          {
+            "name": "simplified",
+            "config": {}
+          }
+        ]
+      },
+      {
+        "size": 2,
+        "tools": [
+          {
+            "name": "literal",
+            "config": {}
+          },
+          {
+            "name": "twords",
+            "config": {}
+          },
+          {
+            "name": "tnotes",
+            "config": {
+              "quote_resource": "https://git.door43.org/ru_gl/ru_rlob"
+              }
+          },
+          {
+            "name": "info",
+            "config": {
+              "url": "https://git.door43.org/ru_gl/ru_tn"
+            }
+          }
+        ]
+      },
+      {
+        "size": 2,
+        "tools": [
+          {
+            "name": "personalNotes",
+            "config": {}
+          },
+          {
+            "name": "teamNotes",
+            "config": {}
+          },
+          {
+            "name": "dictionary",
+            "config": {}
+          }
+        ]
+      }
+    ],
+    "description": "Описание шага",
+    "whole_chapter": true,
+    "count_of_users": 1
+  },
+  {
+    "time": 60,
+    "intro": "Описание шага",
+    "title": "2 ШАГ",
+    "config": [
+      {
+        "size": 2,
+        "tools": [
+          {
+            "name": "simplified",
+            "config": {}
+          }
+        ]
+      },
+      {
+        "size": 2,
+        "tools": [
+          {
+            "name": "literal",
+            "config": {}
+          },
+          {
+            "name": "twords",
+            "config": {}
+          },
+          {
+            "name": "tnotes",
+            "config": {
+              "quote_resource": "https://git.door43.org/ru_gl/ru_rlob"
+              }
+          },
+          {
+            "name": "info",
+            "config": {
+              "url": "https://git.door43.org/ru_gl/ru_tn"
+            }
+          }
+        ]
+      },
+      {
+        "size": 2,
+        "tools": [
+          {
+            "name": "commandTranslate",
+            "config": {
+              "moderatorOnly": true,
+              "getFromResource": true
+            }
+          },
+          {
+            "name": "personalNotes",
+            "config": {}
+          },
+          {
+            "name": "teamNotes",
+            "config": {}
+          },
+          {
+            "name": "dictionary",
+            "config": {}
+          }
+        ]
+      }
+    ],
+    "description": "Описание шага",
+    "whole_chapter": true,
+    "count_of_users": 1
+  },
+  {
+    "time": 60,
+    "intro": "Описание шага",
+    "title": "3 ШАГ",
+    "config": [
+      {
+        "size": 2,
+        "tools": [
+          {
+            "name": "simplified",
+            "config": {}
+          }
+        ]
+      },
+      {
+        "size": 2,
+        "tools": [
+          {
+            "name": "literal",
+            "config": {}
+          },
+          {
+            "name": "twords",
+            "config": {}
+          },
+          {
+            "name": "tnotes",
+            "config": {
+              "quote_resource": "https://git.door43.org/ru_gl/ru_rlob"
+              }
+          },
+          {
+            "name": "info",
+            "config": {
+              "url": "https://git.door43.org/ru_gl/ru_tn"
+            }
+          }
+        ]
+      },
+      {
+        "size": 2,
+        "tools": [
+          {
+            "name": "commandTranslate",
+            "config": {
+              "moderatorOnly": true
+            }
+          },
+          {
+            "name": "personalNotes",
+            "config": {}
+          },
+          {
+            "name": "teamNotes",
+            "config": {}
+          },
+          {
+            "name": "dictionary",
+            "config": {}
+          }
+        ]
+      }
+    ],
+    "description": "Описание шага",
+    "whole_chapter": true,
+    "count_of_users": 1
+  }
+]','bible'::project_type,'[
+  {
+    "id": 1,
+    "block": [
+      {
+        "answer": "",
+        "question": "Как называется язык?"
+      },
+      {
+        "answer": "",
+        "question": "Какое межд.сокращение для языка?"
+      },
+      {
+        "answer": "",
+        "question": "Где распространён?"
+      },
+      {
+        "answer": "",
+        "question": "Почему выбран именно этот язык или диалект?"
+      },
+      {
+        "answer": "",
+        "question": "Какой алфавит используется в данном языке?"
+      }
+    ],
+    "title": "О языке",
+    "resume": ""
+  },
+  {
+    "id": 2,
+    "block": [
+      {
+        "answer": "",
+        "question": "Почему нужен этот перевод?"
+      },
+      {
+        "answer": "",
+        "question": "Какие переводы уже есть на этом языке?"
+      },
+      {
+        "answer": "",
+        "question": "Какие диалекты или другие языки могли бы пользоваться этим переводом?"
+      },
+      {
+        "answer": "",
+        "question": "Как вы думаете могут ли возникнуть трудности с другими командами, уже работающими над переводом библейского контента на этот язык?"
+      }
+    ],
+    "title": "О необходимости перевода",
+    "resume": ""
+  },
+  {
+    "id": 3,
+    "block": [
+      {
+        "answer": "",
+        "question": "кто будет пользоваться переводом?"
+      },
+      {
+        "answer": "",
+        "question": "На сколько человек в данной народности рассчитан этот перевод?"
+      },
+      {
+        "answer": "",
+        "question": "какие языки используют постоянно эти люди, кроме своего родного языка?"
+      },
+      {
+        "answer": "",
+        "question": "В этой народности больше мужчин/женщин, пожилых/молодых, грамотных/неграмотных?"
+      }
+    ],
+    "title": "О целевой аудитории перевода",
+    "resume": ""
+  },
+  {
+    "id": 4,
+    "block": [
+      {
+        "answer": "",
+        "question": "Какой будет тип перевода, смысловой или подстрочный (дословный, буквальный)?"
+      },
+      {
+        "answer": "",
+        "question": "Какой будет стиль языка у перевода?"
+      },
+      {
+        "answer": "",
+        "question": "Как будет распространяться перевод?"
+      }
+    ],
+    "title": "О стиле перевода",
+    "resume": ""
+  },
+  {
+    "id": 5,
+    "block": [
+      {
+        "answer": "",
+        "question": "Кто инициаторы перевода (кто проявил интерес к тому, чтобы начать работу над переводом)?"
+      },
+      {
+        "answer": "",
+        "question": "Кто будет работать над переводом?"
+      }
+    ],
+    "title": "О команде",
+    "resume": ""
+  },
+  {
+    "id": 6,
+    "block": [
+      {
+        "answer": "",
+        "question": "О будет оценивать перевод?"
+      },
+      {
+        "answer": "",
+        "question": "Как будет поддерживаться качество перевода?"
+      }
+    ],
+    "title": "О качестве перевода",
+    "resume": ""
+  }
+]');
+
   -- END METHODS
 
   -- ROLE PERMISSIONS
@@ -2896,3 +3649,20 @@
 
   -- END PROGRESS
 -- END DUMMY DATA
+
+-- INSERT BUCKET IN STORAGE
+  -- insert a bucket in storage to store avatars
+    insert into storage.buckets
+      (id, name, public)
+    values
+      ('avatars', 'avatars', true);
+
+  -- create Policies
+    CREATE POLICY "Give users authenticated access to folder 1oj01fe_0" ON storage.objects FOR SELECT TO public USING (bucket_id = 'avatars' AND (storage.foldername(name))[1] = 'private' AND auth.role() = 'authenticated');
+
+    CREATE POLICY "Give users authenticated access to folder 1oj01fe_1" ON storage.objects FOR INSERT TO public WITH CHECK (bucket_id = 'avatars' AND (storage.foldername(name))[1] = 'private' AND auth.role() = 'authenticated');
+
+    CREATE POLICY "Give users authenticated access to folder 1oj01fe_2" ON storage.objects FOR UPDATE TO public USING (bucket_id = 'avatars' AND (storage.foldername(name))[1] = 'private' AND auth.role() = 'authenticated');
+
+    CREATE POLICY "Give users authenticated access to folder 1oj01fe_3" ON storage.objects FOR DELETE TO public USING (bucket_id = 'avatars' AND (storage.foldername(name))[1] = 'private' AND auth.role() = 'authenticated');
+-- END INSERT BUCKET IN STORAGE

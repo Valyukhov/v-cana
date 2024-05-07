@@ -1,23 +1,19 @@
 import { useMemo, useState } from 'react'
+
 import { useRouter } from 'next/router'
-
-import JSZip from 'jszip'
-
 import { useTranslation } from 'next-i18next'
 
-import { saveAs } from 'file-saver'
-
-import useSupabaseClient from 'utils/supabaseClient'
-
-import Showdown from 'showdown'
+import { MdToZip, JsonToMd } from '@texttree/obs-format-convert-rcl'
 
 import Breadcrumbs from 'components/Breadcrumbs'
 import ListBox from 'components/ListBox'
+import CheckBox from 'components/CheckBox'
 
+import useSupabaseClient from 'utils/supabaseClient'
 import { usfmFileNames } from 'utils/config'
 import {
+  createObjectToTransform,
   compileChapter,
-  compilePdfObs,
   convertToUsfm,
   downloadFile,
   downloadPdf,
@@ -36,7 +32,6 @@ const downloadSettingsBook = {
 
 function Download({
   project,
-  user,
   chapterNum,
   setIsOpenDownloading,
   bookCode,
@@ -49,7 +44,7 @@ function Download({
   const {
     query: { code },
   } = useRouter()
-  const [book] = useGetBook({ token: user?.access_token, code, book_code: bookCode })
+  const [book] = useGetBook({ code, book_code: bookCode })
 
   const options = useMemo(() => {
     const options = [{ label: 'PDF', value: 'pdf' }]
@@ -76,11 +71,11 @@ function Download({
   }, [project, isBook])
 
   const [chapters] = useGetChapters({
-    token: user?.access_token,
     code,
     book_code: bookCode,
   })
 
+  const [isSaving, setIsSaving] = useState(false)
   const [downloadType, setDownloadType] = useState('pdf')
   const [downloadSettings, setDownloadSettings] = useState(
     isBook ? downloadSettingsBook : downloadSettingsChapter
@@ -92,79 +87,6 @@ function Download({
       chapters?.find((chapter) => chapter.num.toString() === chapterNum.toString()),
     [chapters, chapterNum]
   )
-  const compileBook = async (book, type = 'txt', downloadSettings) => {
-    const chapters = await getBookJson(book?.id)
-    if (chapters?.length === 0) {
-      return
-    }
-
-    switch (type) {
-      case 'txt':
-        return convertToUsfm({
-          jsonChapters: chapters,
-          book,
-          project: {
-            code: project?.code,
-            title: project?.title,
-            language: {
-              code: project?.languages?.code,
-              orig_name: project?.languages?.orig_name,
-            },
-          },
-        })
-      case 'pdf':
-        const frontPdf = downloadSettings?.withFront
-          ? `<div class="break" style="text-align: center"><h1>${project?.title}</h1><h1>${book?.properties?.scripture?.toc1}</h1></div>`
-          : ''
-        let main = ''
-        for (const el of chapters) {
-          const chapter = await compileChapter(
-            { json: el.text, chapterNum: el.num, book },
-            'html'
-          )
-          if (chapter) {
-            main += `<div>${chapter ?? ''}</div>`
-          }
-        }
-        return frontPdf + main
-      case 'pdf-obs':
-        const converter = new Showdown.Converter()
-        let obs = ''
-        for (const el of chapters) {
-          if (el?.text) {
-            const story = await compilePdfObs(
-              {
-                json: el?.text,
-                chapterNum: el.num,
-              },
-              downloadSettings
-            )
-            if (story) {
-              obs += `<div class="break">${story}</div>`
-            }
-          }
-        }
-        if (!book?.properties?.obs) {
-          return obs
-        }
-        const { title: _title, intro: _intro, back: _back } = book.properties.obs
-        const title = _title ? `<h1>${_title}</h1>` : ''
-        const front = downloadSettings?.withFront
-          ? `<div class="break" style="text-align: center"><h1>${project?.title}</h1>${title}</div>`
-          : ''
-        const intro =
-          _intro && downloadSettings?.withIntro
-            ? `<div class="break" >${converter.makeHtml(_intro)}</div>`
-            : ''
-        const back =
-          _back && downloadSettings?.withBack
-            ? `<div>${converter.makeHtml(_back)}</div>`
-            : ''
-        return front + intro + obs + back
-      default:
-        break
-    }
-  }
 
   const getBookJson = async (book_id) => {
     const { data } = await supabase
@@ -176,43 +98,74 @@ function Download({
   }
 
   const downloadZip = async (downloadingBook) => {
-    const zip = new JSZip()
     const obs = await getBookJson(downloadingBook.id)
+    const fileData = { name: 'content', isFolder: true, content: [] }
+
     for (const story of obs) {
-      const text = await compileChapter(
-        {
-          json: story?.text,
-          chapterNum: story?.num,
-        },
-        'markdown'
+      if (!story || story.text === null) {
+        continue
+      }
+      const text = JsonToMd(
+        createObjectToTransform({
+          json: story.text,
+          chapterNum: story.num,
+        })
       )
+
       if (text) {
-        zip.folder('content').file(story?.num + '.md', text)
+        const chapterFile = {
+          name: `${story.num}.md`,
+          content: text,
+        }
+        fileData.content.push(chapterFile)
       }
     }
+
     if (downloadingBook?.properties?.obs?.back) {
-      zip
-        .folder('content')
-        .folder('back')
-        .file('intro.md', downloadingBook?.properties?.obs?.back)
-    }
-    if (downloadingBook?.properties?.obs?.intro) {
-      zip
-        .folder('content')
-        .folder('front')
-        .file('intro.md', downloadingBook?.properties?.obs?.intro)
-    }
-    if (downloadingBook?.properties?.obs?.title) {
-      zip
-        .folder('content')
-        .folder('front')
-        .file('title.md', downloadingBook?.properties?.obs?.title)
+      const backFile = {
+        name: 'intro.md',
+        content: downloadingBook.properties.obs.back,
+      }
+      const backFolder = {
+        name: 'back',
+        isFolder: true,
+        content: [backFile],
+      }
+      fileData.content.push(backFolder)
     }
 
-    zip.generateAsync({ type: 'blob' }).then(function (blob) {
-      saveAs(blob, `${downloadingBook?.properties?.obs?.title || 'obs'}.zip`)
+    if (downloadingBook?.properties?.obs?.intro) {
+      const introFile = {
+        name: 'intro.md',
+        content: downloadingBook.properties.obs.intro,
+      }
+      const frontFolder = {
+        name: 'front',
+        isFolder: true,
+        content: [introFile],
+      }
+      fileData.content.push(frontFolder)
+    }
+
+    if (downloadingBook?.properties?.obs?.title) {
+      const titleFile = {
+        name: 'title.md',
+        content: downloadingBook.properties.obs.title,
+      }
+      const frontFolder = {
+        name: 'front',
+        isFolder: true,
+        content: [titleFile],
+      }
+      fileData.content.push(frontFolder)
+    }
+
+    MdToZip({
+      fileData,
+      fileName: `${downloadingBook.properties.obs.title || 'obs'}.zip`,
     })
   }
+
   const links = [
     { title: project?.title, href: '/projects/' + project?.code },
     {
@@ -225,11 +178,15 @@ function Download({
         : t('books:' + bookCode),
     },
   ]
+
   const handleSave = async () => {
+    const chapters = await getBookJson(book?.id)
+    setIsSaving(true)
+
     switch (downloadType) {
       case 'txt':
         downloadFile({
-          text: await compileChapter(
+          text: compileChapter(
             {
               json: chapter?.text,
               title: `${project?.title}\n${book?.properties.scripture.toc1}\n${book?.properties.scripture.chapter_label} ${chapterNum}`,
@@ -242,55 +199,31 @@ function Download({
         })
         break
       case 'pdf':
-        isBook
-          ? downloadPdf({
-              htmlContent: await compileBook(
-                book,
-                project?.type === 'obs' ? 'pdf-obs' : 'pdf',
-                downloadSettings
-              ),
-              projectLanguage: {
-                code: project.languages.code,
-                title: project.languages.orig_name,
-              },
-              fileName: `${project.title}_${
-                project?.type !== 'obs'
-                  ? book?.properties?.scripture?.toc1 ?? t('Book')
-                  : book?.properties?.obs?.title ?? t('OpenBibleStories')
-              }`,
-            })
-          : downloadPdf({
-              htmlContent: await compileChapter(
-                {
-                  json: chapter?.text,
-                  chapterNum,
-                  project: {
-                    title: project.title,
-                  },
-                  book,
-                },
-                project?.type === 'obs' ? 'pdf-obs' : 'pdf',
-                downloadSettings
-              ),
-              projectLanguage: {
-                code: project.languages.code,
-                title: project.languages.orig_name,
-              },
-              fileName: `${project.title}_${
-                project?.type !== 'obs'
-                  ? book?.properties?.scripture?.toc1 ?? t('Book')
-                  : book?.properties?.obs?.title ?? t('OpenBibleStories')
-              }`,
-            })
+        await downloadPdf({
+          ...(isBook ? { book } : {}),
+          ...(isBook ? { chapters } : {}),
+          downloadSettings,
+          projectTitle: project.title,
+          obs: project?.type === 'obs',
+          chapter: { json: chapter?.text, chapterNum: chapter?.num },
+          title: book?.properties?.scripture?.toc1 || book?.properties?.obs?.title,
+          projectLanguage: project.languages.orig_name,
+          fileName: `${project.title}_${
+            project?.type !== 'obs'
+              ? book?.properties?.scripture?.toc1 ?? t('Book')
+              : book?.properties?.obs?.title ?? t('OpenBibleStories')
+          }`,
+          t,
+        })
+
         break
       case 'markdown':
         downloadFile({
-          text: await compileChapter(
-            {
+          text: JsonToMd(
+            createObjectToTransform({
               json: chapter?.text,
               chapterNum: chapter?.num,
-            },
-            'markdown'
+            })
           ),
           title: `${String(chapter?.num).padStart(2, '0')}.md`,
           type: 'markdown/plain',
@@ -301,13 +234,25 @@ function Download({
         break
       case 'usfm':
         downloadFile({
-          text: await compileBook(book, 'txt', downloadSettings),
+          text: convertToUsfm({
+            jsonChapters: chapters,
+            book,
+            project: {
+              code: project?.code,
+              title: project?.title,
+              language: {
+                code: project?.languages?.code,
+                orig_name: project?.languages?.orig_name,
+              },
+            },
+          }),
           title: usfmFileNames[book?.code],
         })
         break
       default:
         break
     }
+    setIsSaving(false)
   }
   return (
     <div className="flex flex-col gap-7">
@@ -320,7 +265,7 @@ function Download({
           }
         />
       )}
-      <div className="flex flex-col gap-7 text-white">
+      <div className="flex flex-col gap-7 text-th-secondary-10">
         <div className="text-xl font-bold">{t('Download')}</div>
         <ListBox
           options={options}
@@ -328,48 +273,29 @@ function Download({
           selectedOption={downloadType}
         />
         <div className="flex gap-7 items-end">
-          <div className="flex flex-col w-full">
+          <div
+            className={`flex flex-col w-full space-y-4 ${
+              downloadType === 'pdf' ? 'opacity-100' : 'opacity-0'
+            }`}
+          >
             {Object.keys(downloadSettings)
-              .filter((key) => project?.type === 'obs' || key === 'withFront')
+              .filter(
+                (key) =>
+                  (project?.type === 'obs' || key === 'withFront') &&
+                  downloadType !== 'usfm'
+              )
               .map((key, index) => {
                 return (
-                  <div className="inline-flex justify-between items-center" key={key}>
-                    <label htmlFor={key}>{t(key)}</label>
-
-                    <label
-                      className="relative flex cursor-pointer items-center rounded-full p-3"
-                      htmlFor={key}
-                      data-ripple-dark="true"
-                    >
-                      <input
-                        id={key}
-                        type="checkbox"
-                        className="w-7 h-7 shadow-sm before:content[''] peer relative cursor-pointer appearance-none rounded-md border border-cyan-700 bg-white checked:bg-cyan-700 transition-all before:absolute before:top-1/2 before:left-1/2 before:block before:-translate-y-1/2 before:-translate-x-1/2 before:rounded-full before:opacity-0 before:transition-opacity hover:before:opacity-10"
-                        checked={downloadSettings[key]}
-                        onChange={() =>
-                          setDownloadSettings((prev) => {
-                            return { ...prev, [key]: !downloadSettings[key] }
-                          })
-                        }
-                      />
-                      <div className="pointer-events-none absolute top-1/2 left-1/2 -translate-y-1/2 -translate-x-1/2 text-white opacity-0 transition-opacity peer-checked:opacity-100 stroke-white fill-white">
-                        <svg
-                          width="15"
-                          height="11"
-                          viewBox="0 0 15 11"
-                          fill="none"
-                          xmlns="http://www.w3.org/2000/svg"
-                        >
-                          <path
-                            fillRule="evenodd"
-                            clipRule="evenodd"
-                            d="M14.1449 0.762586C14.4429 1.06062 14.4429 1.54382 14.1449 1.84185L5.75017 10.2366C5.45214 10.5346 4.96894 10.5346 4.67091 10.2366L0.855116 6.4208C0.557084 6.12277 0.557084 5.63957 0.855116 5.34153C1.15315 5.0435 1.63635 5.0435 1.93438 5.34153L5.21054 8.61769L13.0656 0.762586C13.3637 0.464555 13.8469 0.464555 14.1449 0.762586Z"
-                            fill="white"
-                          />
-                        </svg>
-                      </div>
-                    </label>
-                  </div>
+                  <CheckBox
+                    key={key}
+                    onChange={() =>
+                      setDownloadSettings((prev) => {
+                        return { ...prev, [key]: !downloadSettings[key] }
+                      })
+                    }
+                    checked={downloadSettings[key]}
+                    label={t(key)}
+                  />
                 )
               })}
           </div>
@@ -381,8 +307,12 @@ function Download({
           >
             {t('Close')}
           </button>
-          <button onClick={handleSave} className="btn-secondary flex-1">
-            {t('Save')}
+          <button
+            onClick={handleSave}
+            disabled={isSaving}
+            className="btn-secondary flex-1"
+          >
+            {isSaving ? t('Saving') : t('Save')}
           </button>
         </div>
       </div>

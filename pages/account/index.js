@@ -1,3 +1,5 @@
+import { useEffect } from 'react'
+
 import Head from 'next/head'
 
 import { useTranslation } from 'next-i18next'
@@ -7,16 +9,22 @@ import Account from 'components/Account'
 
 function AccountHomePage() {
   const { t } = useTranslation(['users', 'common'])
+  useEffect(() => {
+    document.body.classList.add('no-scrollbar')
 
+    return () => {
+      document.body.classList.remove('no-scrollbar')
+    }
+  }, [])
   return (
-    <div>
+    <>
       <Head>
         <title>{t('V-CANAAccount')}</title>
         <meta name="description" content="VCANA" />
         <link rel="icon" href="/favicon.ico" />
       </Head>
       <Account />
-    </div>
+    </>
   )
 }
 

@@ -1,23 +1,25 @@
 import TranslatorImage from 'components/TranslatorImage'
 
-import { useCurrentUser } from 'lib/UserContext'
 import { useTranslators } from 'utils/hooks'
 
-function Translators({ projectCode, size, clickable = false }) {
-  const { user } = useCurrentUser()
+function Translators({ projectCode, size, clickable = false, className, showModerator }) {
   const [translators] = useTranslators({
-    token: user?.access_token,
     code: projectCode,
   })
 
   return (
-    <div className="flex">
+    <div className="flex items-center z-10">
       {translators && translators.length > 0 && (
         <>
           {translators.map((item, key) => {
             return (
-              <div key={key} className="-mx-1">
-                <TranslatorImage clickable={clickable} item={item} size={size} />
+              <div key={key} className={className}>
+                <TranslatorImage
+                  clickable={clickable}
+                  item={item}
+                  size={size}
+                  showModerator={showModerator}
+                />
               </div>
             )
           })}

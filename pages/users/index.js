@@ -3,15 +3,11 @@ import Link from 'next/link'
 
 import { serverSideTranslations } from 'next-i18next/serverSideTranslations'
 import { useTranslation } from 'next-i18next'
-
-import UsersList from 'components/Users/List'
-
-import { useCurrentUser } from 'lib/UserContext'
+import UsersList from 'components/Users/UsersList'
 
 export default function UsersPage() {
   const { t } = useTranslation(['users', 'common'])
 
-  const { user } = useCurrentUser()
   return (
     <>
       <Head>
@@ -23,8 +19,8 @@ export default function UsersPage() {
       </Head>
       <div className="mx-auto max-w-7xl">
         <div>{t('Users')}</div>
-        <UsersList access_token={user?.access_token} />
-        <Link href={'/users/create'} className="btn btn-filled">
+        <UsersList />
+        <Link href={'/users/create'} className="btn-primary">
           {t('CreateNewUser')}
         </Link>
       </div>
