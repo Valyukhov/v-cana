@@ -48,7 +48,8 @@ export default function ProgressPage({ last_step }) {
           setVersesRange(res.data.filter((el) => el.translator === user.login))
         })
     }
-  }, [book, chapter, project, supabase, user?.login])
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [book, chapter, project, user?.login])
 
   const fetchStepsData = async (project, step) => {
     const stepsData = await supabase
@@ -97,6 +98,7 @@ export default function ProgressPage({ last_step }) {
           count_of_users,
           time,
           description,
+          whole_book,
         } = stepsData
         const curentSteps = await fetchCurrentSteps(projects.id)
         const currentStepObject = curentSteps.find(
@@ -135,6 +137,12 @@ export default function ProgressPage({ last_step }) {
           base_manifest: projects?.base_manifest?.resource,
           is_rtl: projects?.is_rtl,
         }
+
+        const { data: activeTranslators } = await supabase.rpc('get_active_translators', {
+          project_code: project,
+          book_code: book,
+          chapter_num: chapter,
+        })
         setStepConfigData({
           count_of_users: count_of_users,
           time,
@@ -144,6 +152,8 @@ export default function ProgressPage({ last_step }) {
           last_step,
           current_step: step,
           project_code: project,
+          activeTranslators: activeTranslators || [],
+          whole_book,
         })
         setStepConfig(stepConfig)
       } catch (error) {
@@ -320,6 +330,7 @@ export async function getServerSideProps({ locale, params }) {
         'books',
         'users',
         'error',
+        'aquifer',
       ])),
       last_step: steps.data.sorting,
     },

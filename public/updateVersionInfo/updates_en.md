@@ -1,3 +1,25 @@
+# Version 0.22.0
+## Date: 06/14/2024
+
+### **Added:**
+- support rtl in Brief, BookReader
+- support range in verse for view Bible
+
+### **Fixed:**
+- quotes in TN
+
+# Version 0.21.0
+## Date: 06/04/2024
+
+### **Added:**
+- ability to download project for offline version
+
+# Version 0.20.0
+## Date: 05/22/2024
+
+### **Added:**
+- Aquifer tool
+
 # Version 0.19.0
 ## Date: 04/17/2024
 
@@ -8,13 +30,13 @@
 ## Date: 04/16/2024
 
 ### **Fixed:**
-- fixed content displacement when scrollbar appears
+- content displacement when scrollbar appears
 
 # Version 0.18.1
 ## Date: 04/15/2024
 
 ### **Added:**
-- added animation of changing the state of the switches (Brief, switching the "Read-only mode" when assigning verses)
+- animation of changing the state of the switches (Brief, switching the "Read-only mode" when assigning verses)
 
 # Version 0.18.0
 ## Date: 04/11/2024
