@@ -1,4 +1,5 @@
 import { createPagesServerClient } from '@supabase/auth-helpers-nextjs'
+
 import { supabaseService } from 'utils/supabaseService'
 
 export default async function handler(req, res) {
@@ -12,7 +13,7 @@ export default async function handler(req, res) {
       supabaseKey: process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY,
       supabaseUrl: process.env.SUPABASE_URL,
       cookieOptions: {
-        name: process.env.NEXT_PUBLIC_COOKIE_NAME ?? 'sb-vcana-cookies',
+        name: process.env.NEXT_PUBLIC_COOKIE_NAME ?? 'sb-level-cookies',
       },
     }
   )

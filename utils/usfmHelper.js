@@ -12,7 +12,7 @@ const getFootnote = (verseObject) => {
       ''
     )
     .trim()
-  return '<span style="color:gray"> [' + content + '] </span>'
+  return '<span style="color:#332f2c"> [' + content + '] </span>'
 }
 
 const getMilestone = (verseObject, showUnsupported) => {
@@ -123,7 +123,18 @@ const getObject = (verseObject, showUnsupported) => {
 export const parseChapter = (chapter, verses) => {
   let resultChapter = Object.entries(chapter)
   if (verses && verses.length > 0) {
-    resultChapter = resultChapter.filter((el) => verses.includes(el[0]))
+    resultChapter = resultChapter.filter(([verse]) => {
+      const range = verse.split('-')
+      if (range.length > 1) {
+        for (let i = parseInt(range[0]); i <= parseInt(range[1]); i++) {
+          if (verses.includes(String(i))) {
+            return true
+          }
+        }
+      } else {
+        return verses.includes(String(verse))
+      }
+    })
   }
   return resultChapter.map((el) => {
     return { verse: el[0], text: getVerseText(el[1].verseObjects, true) }

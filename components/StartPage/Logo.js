@@ -1,46 +1,49 @@
-import { useRouter } from 'next/router'
+import { useState } from 'react'
+
 import Link from 'next/link'
+import { useRouter } from 'next/router'
 
-import TTMLogo from 'public/ttm-logo.svg'
-import Facebook from 'public/facebook.svg'
-import Instagram from 'public/instagram.svg'
-import Telegram from 'public/telegram.svg'
-import Youtube from 'public/youtube.svg'
+import Close from 'public/icons/close.svg'
+import GlokasLogo from 'public/icons/glokas-logo.svg'
 
-function Logo({ t }) {
+function Logo({ isMobilePage, t }) {
   const { locale } = useRouter()
+  const isRuLocale = locale === 'ru'
 
-  let socialLinks = [
-    { href: 'https://www.youtube.com/@texttree', Icon: Youtube },
-    { href: 'https://texttree.t.me', Icon: Telegram },
-    { href: 'https://facebook.com/texttreeorg', Icon: Facebook, size: '6' },
-    { href: 'https://instagram.com/texttreeorg', Icon: Instagram },
-  ]
+  const [isOpen, setIsOpen] = useState(true)
 
-  if (locale !== 'ru') {
-    socialLinks = [{ href: 'https://www.youtube.com/@texttreemovement', Icon: Youtube }]
+  const handleClose = () => {
+    setIsOpen(false)
   }
 
+  if (!isOpen) return null
+
   return (
-    <div className="flex flex-col w-full gap-6 md:gap-14">
-      <p className="font-semibold md:font-bold mr-10">{t('LogoHeader')}</p>
-      <p className="text-sm md:text-base font-normal">{t('LogoText')}</p>
+    <div className="flex w-full flex-col gap-6">
+      <div className="relative">
+        <p className="mr-10 font-semibold md:font-bold">{t('LogoHeader')}</p>
+        {isMobilePage && (
+          <Close
+            onClick={handleClose}
+            className="absolute right-0 top-0 h-6 w-6 cursor-pointer"
+          />
+        )}
+      </div>
+      <div
+        className={`flex w-full flex-col gap-6 overflow-auto pr-5 text-sm md:${
+          isRuLocale ? 'text-sm' : 'text-base'
+        } font-normal`}
+      >
+        <p>{t('LogoText.p1')}</p>
+        <p>{t('LogoText.p2')}</p>
+        <p>{t('LogoText.p3')}</p>
+        <p>{t('LogoText.p4')}</p>
+        <p>{t('LogoText.p5')}</p>
 
-      <div className="flex items-center gap-5 md:gap-10 flex-col md:flex-row">
-        <Link href="https://www.texttree.org" target="_blank">
-          <TTMLogo />
-        </Link>
-
-        <div className="flex justify-center items-center gap-3">
-          {socialLinks.map(({ href, Icon, size }, index) => (
-            <Link href={href} key={index} target="_blank">
-              <div
-                className={`flex items-center justify-center w-8 h-8 rounded-full bg-slate-550`}
-              >
-                <Icon className={size ? `h-${size}` : 'w-5'} />
-              </div>
-            </Link>
-          ))}
+        <div className="flex flex-col items-center gap-5 md:flex-row md:gap-10">
+          <Link href="https://glokas.com" target="_blank">
+            <GlokasLogo />
+          </Link>
         </div>
       </div>
     </div>

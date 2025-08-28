@@ -19,8 +19,8 @@ function AccountHomePage() {
   return (
     <>
       <Head>
-        <title>{t('V-CANAAccount')}</title>
-        <meta name="description" content="VCANA" />
+        <title>{t('LEVELAccount')}</title>
+        <meta name="description" content="LEVEL" />
         <link rel="icon" href="/favicon.ico" />
       </Head>
       <Account />
@@ -39,6 +39,8 @@ export async function getServerSideProps({ locale }) {
         'books',
         'projects',
         'project-edit',
+        'about',
+        'start-page',
       ])),
     },
   }

@@ -1,7 +1,6 @@
 import { useState } from 'react'
 
 import axios from 'axios'
-
 import { useTranslation } from 'next-i18next'
 import { serverSideTranslations } from 'next-i18next/serverSideTranslations'
 
@@ -66,7 +65,12 @@ export default UserCreatePage
 export async function getServerSideProps({ locale }) {
   return {
     props: {
-      ...(await serverSideTranslations(locale, ['users', 'common'])),
+      ...(await serverSideTranslations(locale, [
+        'users',
+        'common',
+        'about',
+        'start-page',
+      ])),
     },
   }
 }

@@ -1,8 +1,9 @@
 import Head from 'next/head'
 import Link from 'next/link'
 
-import { serverSideTranslations } from 'next-i18next/serverSideTranslations'
 import { useTranslation } from 'next-i18next'
+import { serverSideTranslations } from 'next-i18next/serverSideTranslations'
+
 import UsersList from 'components/Users/UsersList'
 
 export default function UsersPage() {
@@ -12,12 +13,12 @@ export default function UsersPage() {
     <>
       <Head>
         <title>
-          {t('common:V-CANA')} - {t('UsersList')}
+          {t('common:LEVEL')} - {t('UsersList')}
         </title>
-        <meta name="description" content="VCANA" />
+        <meta name="description" content="LEVEL" />
         <link rel="icon" href="/favicon.ico" />
       </Head>
-      <div className="mx-auto max-w-7xl">
+      <div className="mx-auto max-w-7xl pb-10">
         <div>{t('Users')}</div>
         <UsersList />
         <Link href={'/users/create'} className="btn-primary">
@@ -30,7 +31,12 @@ export default function UsersPage() {
 export async function getStaticProps({ locale }) {
   return {
     props: {
-      ...(await serverSideTranslations(locale, ['users', 'common'])),
+      ...(await serverSideTranslations(locale, [
+        'users',
+        'common',
+        'about',
+        'start-page',
+      ])),
     },
   }
 }

@@ -1,27 +1,46 @@
-import { useTranslation } from 'next-i18next'
+import Close from 'public/icons/close.svg'
 
-import Close from 'public/close.svg'
-
-function ModalInSideBar({ isOpen, setIsOpen, children }) {
-  const { t } = useTranslation()
-
+function ModalInSideBar({
+  isOpen,
+  setIsOpen,
+  children,
+  modalTitle,
+  buttonTitle,
+  collapsed,
+  contentClassName = 'p-4',
+  width = '30rem',
+}) {
   return (
     <>
-      <div className="cursor-pointer text-th-text-primary hover:opacity-70">
-        {t('personalNotes')}
+      <div
+        className={`overflow-hidden ${
+          collapsed ? 'lg:w-0' : 'lg:w-auto'
+        } cursor-pointer ${
+          isOpen ? 'text-th-text-primary' : 'lg:text-th-secondary-300'
+        } group-hover:text-th-text-primary ${collapsed ? 'lg:hidden' : ''}`}
+      >
+        <span className="whitespace-nowrap">{buttonTitle}</span>
       </div>
 
       {isOpen && (
         <div
-          className="absolute flex flex-col right-0 top-0 w-full h-full min-h-full bg-th-secondary-10 z-10 md:h-min px-3 sm:px-7 pb-3 sm:pb-7 overflow-auto sm:overflow-visible cursor-default shadow-md border-th-secondary-300 sm:border sm:rounded-2xl md:max-h-full md:left-full md:ml-5 overflow-y-auto"
+          className={`absolute right-0 top-0 z-10 ml-4 flex h-[calc(100vh-40px)] min-h-full w-full cursor-default flex-col overflow-auto rounded-none border-th-secondary-300 bg-th-secondary-10 pb-3 shadow-md sm:overflow-visible sm:rounded-xl sm:border sm:pb-7 md:left-full md:h-min md:max-h-full md:overflow-hidden md:rounded-xl lg:ml-0 lg:rounded-none`}
+          style={{
+            width: window.matchMedia('(min-width: 1024px)').matches ? width : '100%',
+          }}
           onClick={(e) => e.stopPropagation()}
         >
-          <div className="sticky top-0 flex items-center justify-end py-6 bg-th-secondary-10">
-            <button className="text-right" onClick={() => setIsOpen(false)}>
-              <Close className="h-8 stroke-th-primary-100" />
+          <div className="sticky top-0 flex items-center justify-center bg-th-secondary-400 py-4 sm:rounded-t-xl lg:rounded-t-none lg:px-7">
+            <p className="text-lg font-medium text-th-text-secondary-100">{modalTitle}</p>
+            <button className="absolute right-4" onClick={() => setIsOpen(false)}>
+              <Close className="h-8 stroke-th-secondary-10" />
             </button>
           </div>
-          <div className="h-full overflow-x-hidden overflow-y-auto p-4">{children}</div>
+          <div
+            className={`h-full overflow-y-auto overflow-x-hidden px-4 sm:px-7 ${contentClassName}`}
+          >
+            {children}
+          </div>
         </div>
       )}
     </>

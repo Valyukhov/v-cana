@@ -2,9 +2,9 @@ import { useEffect, useState } from 'react'
 
 import Head from 'next/head'
 import { useRouter } from 'next/router'
-import { useTranslation } from 'react-i18next'
 
 import { serverSideTranslations } from 'next-i18next/serverSideTranslations'
+import { useTranslation } from 'react-i18next'
 
 import IntroStep from 'components/IntroStep'
 import Modal from 'components/Modal'
@@ -95,7 +95,7 @@ export default function IntroPage() {
     <div className="layout-appbar">
       <Head>
         <title>{title?.title}</title>
-        <meta name="description" content="VCANA" />
+        <meta name="description" content="LEVEL" />
         <link rel="icon" href="/favicon.ico" />
       </Head>
       <IntroStep
@@ -126,7 +126,13 @@ export async function getServerSideProps({ locale, params }) {
   }
   return {
     props: {
-      ...(await serverSideTranslations(locale, ['intro-steps', 'common', 'users'])),
+      ...(await serverSideTranslations(locale, [
+        'intro-steps',
+        'common',
+        'users',
+        'about',
+        'start-page',
+      ])),
     },
   }
 }

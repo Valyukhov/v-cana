@@ -2,9 +2,8 @@ import Head from 'next/head'
 import { useRouter } from 'next/router'
 
 import axios from 'axios'
-
-import { serverSideTranslations } from 'next-i18next/serverSideTranslations'
 import { useTranslation } from 'next-i18next'
+import { serverSideTranslations } from 'next-i18next/serverSideTranslations'
 
 import { useUser } from 'utils/hooks'
 
@@ -29,9 +28,9 @@ export default function UserPage() {
     <>
       <Head>
         <title>
-          {t('V-CANA')} - {t('profile')}
+          {t('LEVEL')} - {t('profile')}
         </title>
-        <meta name="description" content="VCANA" />
+        <meta name="description" content="LEVEL" />
         <link rel="icon" href="/favicon.ico" />
       </Head>
       {router.isFallback ? (
@@ -71,7 +70,12 @@ export default function UserPage() {
 export async function getStaticProps({ locale }) {
   return {
     props: {
-      ...(await serverSideTranslations(locale, ['users', 'common'])),
+      ...(await serverSideTranslations(locale, [
+        'users',
+        'common',
+        'about',
+        'start-page',
+      ])),
     },
   }
 }

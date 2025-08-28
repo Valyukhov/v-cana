@@ -1,10 +1,12 @@
 import axios from 'axios'
-import usfm from 'usfm-js'
 import jsyaml from 'js-yaml'
+import usfm from 'usfm-js'
 
 import { JsonToPdf } from '@texttree/obs-format-convert-rcl'
 
+import gitDoorAxios from '../lib/axios'
 import { obsStoryVerses } from './config'
+
 const isServer = typeof window === 'undefined'
 
 export const checkLSVal = (el, val, type = 'string', ext = false) => {
@@ -212,7 +214,7 @@ export const downloadPdf = async ({
       pdfOptions.bookPropertiesObs = {
         ...pdfOptions.bookPropertiesObs,
         titlePageTitle: projectTitle,
-        copyright: 'TextTree Movement®',
+        copyright: 'Glokas®',
         projectLanguage,
       }
     }
@@ -273,7 +275,7 @@ export const downloadPdf = async ({
         ...pdfOptions.bookPropertiesObs,
         titlePageTitle: projectTitle,
         projectLanguage,
-        copyright: 'TextTree Movement®',
+        copyright: 'Glokas®',
       }
     }
 
@@ -334,7 +336,7 @@ export const convertToUsfm = ({ jsonChapters, book, project }) => {
       tag: 'id',
       content: `${book?.code.toUpperCase()} ${project?.code.toUpperCase()} ${
         project?.language.code
-      }_${capitalize(project?.language?.orig_name)}_${project?.title} ${Date()} v-cana`,
+      }_${capitalize(project?.language?.orig_name)}_${project?.title} ${Date()} level`,
     },
     {
       tag: 'usfm',
@@ -403,7 +405,7 @@ export const parseManifests = async ({ resources, current_method }) => {
     const urlArray = pathname.split('/')
     const url = getBaseResourceUrl(urlArray)
     const manifestUrl = getBaseResourceUrl(urlArray) + '/manifest.yaml'
-    const { data } = await axios.get(manifestUrl)
+    const { data } = await gitDoorAxios.get(manifestUrl)
     const manifest = jsyaml.load(data, { json: true })
 
     if (current_method.resources[el]) {
@@ -442,33 +444,42 @@ export const parseManifests = async ({ resources, current_method }) => {
   return { baseResource, newResources }
 }
 
-export const countOfChaptersAndVerses = async ({ link, book_code }) => {
+export const calculateChaptersAndVerses = (usfmData) => {
   let jsonChapterVerse = {}
-  let usfmData = ''
 
+  const jsonData = usfm.toJSON(usfmData)
+  if (jsonData?.chapters) {
+    Object.keys(jsonData?.chapters).forEach((chapterNum) => {
+      let verseCount = 0
+
+      Object.keys(jsonData?.chapters[chapterNum]).forEach((verse) => {
+        if (verse !== 'front') {
+          if (verse.includes('-')) {
+            const [start, end] = verse.split('-').map(Number)
+            verseCount += end - start + 1
+          } else {
+            verseCount += 1
+          }
+        }
+      })
+
+      jsonChapterVerse[chapterNum] = verseCount
+    })
+  }
+
+  return { data: jsonChapterVerse, error: null }
+}
+export const getCountChaptersAndVerses = async ({ link, book_code }) => {
   if (book_code === 'obs') {
     return { data: obsStoryVerses, error: null }
   }
 
   try {
-    usfmData = await axios.get(link)
+    const { data } = await gitDoorAxios.get(link)
+    return calculateChaptersAndVerses(data)
   } catch (error) {
     return { data: null, error }
   }
-  try {
-    const jsonData = usfm.toJSON(usfmData.data)
-    if (Object.entries(jsonData?.chapters).length > 0) {
-      Object.keys(jsonData?.chapters).forEach((chapterNum) => {
-        jsonChapterVerse[chapterNum] = Object.keys(jsonData?.chapters[chapterNum]).filter(
-          (verse) => verse !== 'front'
-        ).length
-      })
-    }
-  } catch (error) {
-    return { data: null, error }
-  }
-
-  return { data: jsonChapterVerse, error: null }
 }
 
 export const mdToJson = (md) => {
@@ -666,6 +677,141 @@ export const validationBrief = (brief_data) => {
   return { error: null }
 }
 
+const transformHref = (href) => {
+  if (href.startsWith('rc://')) {
+    const parts = href.slice(5).split('/')
+    return `${parts[0]}_${parts[1]}/${parts[3]}/${parts[4]}`
+  }
+  return href
+}
+
+const readFileFromZip = async (zip, filePath) => {
+  const file = zip.files[filePath]
+  if (!file) {
+    console.warn(`The ${filePath} file was not found.`)
+    return { path: filePath, content: null }
+  }
+
+  const content = await file.async('text')
+  return { path: filePath, content }
+}
+
+export const getTitleOfContent = async ({ zip, href }) => {
+  if (!zip || !href) {
+    console.error('The archive is not provided.')
+    return {}
+  }
+
+  const parts = href.slice(5).split('/')
+  const transformedHref = `${parts[0]}_${parts[1]}/${parts[3]}`
+
+  const targetFiles = [`${transformedHref}`]
+
+  const results = await Promise.all(
+    targetFiles.map((filePath) => readFileFromZip(zip, filePath))
+  )
+  const fileObject = results.reduce((acc, { path, content }) => {
+    const key = path.split('/').pop()
+    acc[key] = content
+    return acc
+  }, {})
+  return fileObject
+}
+
+export const getTableOfContent = async ({ zip, href }) => {
+  if (!zip || !href) {
+    console.error('The archive is not provided.')
+    return {}
+  }
+  const transformedHref = transformHref(href)
+
+  const targetFiles = [`${transformedHref}`]
+
+  const results = await Promise.all(
+    targetFiles.map((filePath) => readFileFromZip(zip, filePath))
+  )
+  const fileObject = results.reduce((acc, { path, content }) => {
+    const key = path.split('/').pop()
+    acc[key] = content
+    return acc
+  }, {})
+  return fileObject
+}
+
+export const parseYAML = (yamlData) => {
+  const parsedData = jsyaml.load(yamlData)
+
+  if (!parsedData || !parsedData.sections || !Array.isArray(parsedData.sections)) {
+    throw new Error("Invalid YAML structure: 'sections' not found or not an array")
+  }
+
+  const processSections = (
+    sections,
+    depth = 0,
+    titleLinkMap = {},
+    flattenedSections = []
+  ) => {
+    sections.forEach((section) => {
+      const { title, link, sections: childSections } = section
+
+      if (title) {
+        const resolvedLink = link || titleLinkMap[title]
+
+        titleLinkMap[title] = resolvedLink
+
+        flattenedSections.push({ title, link: resolvedLink, depth })
+      }
+
+      if (childSections && Array.isArray(childSections)) {
+        processSections(childSections, depth + 1, titleLinkMap, flattenedSections)
+      }
+    })
+
+    return { titleLinkMap, flattenedSections }
+  }
+
+  const { titleLinkMap, flattenedSections } = processSections(parsedData.sections)
+
+  return {
+    titleLinkMap,
+    sections: flattenedSections,
+    title: parsedData.title || null,
+  }
+}
+
+export const getWordsAcademy = async ({ zip, href }) => {
+  if (!zip || !href) {
+    console.error('The archive is not provided.')
+    return {}
+  }
+  const transformedHref = transformHref(href)
+  const targetFiles = [
+    `${transformedHref}/title.md`,
+    `${transformedHref}/01.md`,
+    `${transformedHref}/sub-title.md`,
+  ]
+
+  const results = await Promise.all(
+    targetFiles.map(async (filePath) => {
+      const file = zip.files[filePath]
+      if (!file) {
+        console.warn(`The ${filePath} file was not found.`)
+        return { path: filePath, content: null }
+      }
+
+      const content = await file.async('text')
+      return { path: filePath, content }
+    })
+  )
+
+  const fileObject = results.reduce((acc, { path, content }) => {
+    const key = path.split('/').pop().replace('.md', '')
+    acc[key] = content
+    return acc
+  }, {})
+  return fileObject
+}
+
 export const getWords = async ({ zip, repo, wordObjects }) => {
   if (!zip || !repo || !wordObjects) {
     return []
@@ -687,6 +833,26 @@ export const getWords = async ({ zip, repo, wordObjects }) => {
     }
   })
   return await Promise.all(promises)
+}
+
+export const getWord = async ({ zip, repo, TWLink }) => {
+  if (!zip || !repo || !TWLink) {
+    return null
+  }
+  let uriMd = repo + '/bible/' + TWLink
+  uriMd = uriMd.replace('/../', '/')
+
+  try {
+    const markdown = await zip.files[uriMd].async('string')
+    const splitter = markdown?.search('\n')
+    return {
+      title: markdown?.slice(0, splitter),
+      text: markdown?.slice(splitter),
+    }
+  } catch (error) {
+    console.error('Error fetching markdown:', error)
+    return null
+  }
 }
 
 export const stepValidation = (step) => {
@@ -854,4 +1020,36 @@ export const getBriefName = (briefName, defautlName) => {
   } else {
     return briefName
   }
+}
+
+export const getImageUrl = (imageUrl) => {
+  if (typeof imageUrl === 'string') {
+    return imageUrl
+  }
+  return ''
+}
+
+export function resolvePath(base, currentPath, relativePath) {
+  let absolutePath = currentPath.startsWith('/') ? currentPath : `/${currentPath}`
+  const relativeParts = relativePath.split('/')
+
+  if (relativeParts.length && relativeParts[relativeParts.length - 1].includes('.')) {
+    relativeParts.pop()
+  }
+
+  const absoluteParts = absolutePath.split('/').filter(Boolean)
+
+  relativeParts.forEach((segment) => {
+    if (segment === '..') {
+      absoluteParts.pop()
+    } else if (segment && segment !== '.') {
+      absoluteParts.push(segment)
+    }
+  })
+
+  absolutePath = `${base}/${absoluteParts.join('/')}`
+
+  const updatedCurrentPath = `/${absoluteParts.join('/')}`
+
+  return { absolutePath, updatedCurrentPath }
 }

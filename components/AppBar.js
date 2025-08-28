@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 
 import Link from 'next/link'
 import { useRouter } from 'next/router'
@@ -6,16 +6,18 @@ import { useRouter } from 'next/router'
 import { useRecoilValue } from 'recoil'
 
 import Timer from 'components/Timer'
+
 import Dropdown from './Dropdown'
 import SideBar from './SideBar'
-
 import { stepConfigState } from './state/atoms'
-import useSupabaseClient from 'utils/supabaseClient'
+
 import { useCurrentUser } from 'lib/UserContext'
 
-import VcanaLogo from 'public/vcana-logo.svg'
-import Down from 'public/arrow-down.svg'
-import User from 'public/user.svg'
+import useSupabaseClient from 'utils/supabaseClient'
+
+import Down from 'public/icons/arrow-down.svg'
+import LevelLogo from 'public/icons/level-logo.svg'
+import User from 'public/icons/user.svg'
 
 export default function AppBar({ setIsOpenSideBar, isOpenSideBar }) {
   const [showFullAppbar, setShowFullAppbar] = useState(false)
@@ -25,9 +27,11 @@ export default function AppBar({ setIsOpenSideBar, isOpenSideBar }) {
   const supabase = useSupabaseClient()
   const { user } = useCurrentUser()
   const router = useRouter()
+
   useEffect(() => {
     setIsStepPage(router.pathname === '/translate/[project]/[book]/[chapter]/[step]')
   }, [router.pathname])
+
   useEffect(() => {
     const hasAccess = async () => {
       try {
@@ -44,30 +48,43 @@ export default function AppBar({ setIsOpenSideBar, isOpenSideBar }) {
   }, [supabase, user])
 
   const logoLink = useMemo(() => {
-    return !user?.id ? '/' : access ? '/account' : '/agreements'
+    return !user?.id ? '/' : access ? '/account?tab=0' : '/agreements'
   }, [access, user])
+
   return (
-    <div className={`bg-th-primary-100 ${isOpenSideBar ? 'sticky top-0 z-30' : ''}`}>
+    <div className="sticky top-0 z-30 bg-th-primary-100">
       <div className="appbar" onClick={() => isOpenSideBar && setIsOpenSideBar(false)}>
-        <div className="relative md:static flex items-center h-10 md:justify-start md:gap-7">
-          <SideBar setIsOpenSideBar={setIsOpenSideBar} access={access} />
+        <div className="relative flex h-10 items-center md:static md:justify-start md:gap-7">
+          {![
+            '/user-agreement',
+            '/confession-steps',
+            '/agreements',
+            '/404',
+            '/privacy-policy',
+          ].includes(router.pathname) && (
+            <SideBar
+              setIsOpenSideBar={setIsOpenSideBar}
+              access={access}
+              isOpenSideBar={isOpenSideBar}
+            />
+          )}
           <div
-            className={`flex justify-center w-full ${
-              access && !isStepPage ? '-ml-10' : ''
-            } md:ml-0 `}
+            className={`flex w-full justify-center ${
+              access && !isStepPage ? 'lg:ms-4 xl:-ml-2 2xl:-ml-6' : ''
+            }`}
           >
             <Link href={logoLink}>
-              <VcanaLogo className="h-6 fill-th-text-secondary-100" />
+              <LevelLogo className="h-8 fill-th-text-secondary-100" />
             </Link>
           </div>
 
           {isStepPage && (
-            <div className="flex md:hidden items-center gap-7">
-              <div className="px-5 py-2.5 bg-th-secondary-10 rounded-3xl">
+            <div className="flex items-center gap-7 md:hidden">
+              <div className="rounded-3xl bg-th-secondary-10 px-5 py-2.5">
                 <Timer time={stepConfig.time} />
               </div>
               <Down
-                className={`w-6 h-6 stroke-th-text-secondary-100 transition-transform ${
+                className={`h-6 w-6 stroke-th-text-secondary-100 transition-transform ${
                   showFullAppbar ? 'rotate-180' : ''
                 }`}
                 onClick={() => setShowFullAppbar((prev) => !prev)}
@@ -78,7 +95,7 @@ export default function AppBar({ setIsOpenSideBar, isOpenSideBar }) {
         {isStepPage && (
           <>
             <div
-              className={`block md:flex flex-col text-center text-th-text-secondary-100 ${
+              className={`block flex-col text-center text-th-text-secondary-100 md:flex ${
                 showFullAppbar ? '' : 'hidden'
               }`}
             >
@@ -88,20 +105,23 @@ export default function AppBar({ setIsOpenSideBar, isOpenSideBar }) {
               )}
             </div>
             <div
-              className={`block md:flex items-center gap-4 justify-center md:justify-start text-th-text-primary ${
+              className={`block items-center justify-center gap-4 text-th-text-primary md:flex md:justify-start ${
                 showFullAppbar ? 'flex' : 'hidden'
               }`}
             >
               {stepConfig.count_of_users > 0 && (
-                <div className="flex px-5 py-2.5 items-center gap-1 cursor-default bg-th-secondary-10 rounded-3xl">
-                  <User className="w-4 h-4 stroke-th-text-primary" />
+                <div className="flex cursor-default items-center gap-1 rounded-3xl bg-th-secondary-10 px-5 py-2.5">
+                  <User className="h-4 w-4 stroke-th-text-primary" />
                   {stepConfig.count_of_users}
                 </div>
               )}
-              <div className="hidden md:flex px-5 py-2.5 bg-th-secondary-10 rounded-3xl">
+              <div className="hidden rounded-3xl bg-th-secondary-10 px-5 py-2.5 md:flex">
                 <Timer time={stepConfig.time} />
               </div>
-              <Dropdown description={stepConfig?.description} />
+              <Dropdown
+                description={stepConfig?.description}
+                isWholeBook={stepConfig?.whole_book}
+              />
             </div>
           </>
         )}

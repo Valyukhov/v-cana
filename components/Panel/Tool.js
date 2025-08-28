@@ -1,23 +1,23 @@
 import { useTranslation } from 'next-i18next'
 
 import {
-  Questions,
-  PersonalNotes,
-  CommandEditor,
+  Aquifer,
+  Bible,
   BlindEditor,
+  CommandEditor,
   Dictionary,
-  TeamNotes,
   Editor,
+  Info,
+  OBSTN,
+  PersonalNotes,
+  Questions,
   Reader,
   Retelling,
-  Bible,
-  OBSTN,
-  Info,
-  TWL,
+  TeamNotes,
   TN,
   TQ,
+  TWL,
 } from './'
-import { questions } from 'utils/config'
 
 function Tool({ config, toolName, tnLink, editable = false }) {
   const { t } = useTranslation(['common', 'books'])
@@ -155,6 +155,11 @@ function Tool({ config, toolName, tnLink, editable = false }) {
       title = t('dictionary')
       break
 
+    case 'aquifer':
+      CurrentTool = Aquifer
+      title = t('aquifer')
+      break
+
     case 'info':
       CurrentTool = Info
       title = t('info')
@@ -188,7 +193,7 @@ function Tool({ config, toolName, tnLink, editable = false }) {
   }
   return (
     <>
-      <div className="flex align-bottom-center px-4 h-10 font-bold bg-th-primary-500 text-th-text-secondary-200 text-center items-center justify-center rounded-t-lg">
+      <div className="align-bottom-center flex h-10 items-center justify-center rounded-t-lg bg-th-primary-500 px-4 text-center font-bold text-th-text-secondary-200">
         <p className="truncate">
           {![
             'translate',
@@ -203,14 +208,14 @@ function Tool({ config, toolName, tnLink, editable = false }) {
           {title}
         </p>
       </div>
-      <div className="adaptive-card overflow-hidden border border-b-th-secondary-300 border-l-th-secondary-300 border-r-th-secondary-300 rounded-b-lg box-border">
+      <div className="adaptive-card box-border overflow-hidden rounded-b-lg border border-b-th-secondary-300 border-l-th-secondary-300 border-r-th-secondary-300">
         <div
           id={
             !['twords', 'tnotes'].includes(toolName)
               ? 'container_' + toolName
               : 'precontainer_' + toolName
           }
-          className="relative h-full overflow-x-hidden overflow-y-auto p-4"
+          className="relative h-full overflow-y-auto overflow-x-hidden p-4"
         >
           <CurrentTool config={config} url={url} toolName={toolName} />
         </div>

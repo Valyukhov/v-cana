@@ -1,17 +1,23 @@
 import { useState } from 'react'
-import axios from 'axios'
-import toast from 'react-hot-toast'
-import { useForm } from 'react-hook-form'
-import { useTranslation } from 'next-i18next'
 
-import Modal from 'components/Modal'
+import axios from 'axios'
+import { useTranslation } from 'next-i18next'
+import { useForm } from 'react-hook-form'
+import toast from 'react-hot-toast'
+
+import { calculateRtlDirection } from '@texttree/notepad-rcl'
+
 import ButtonLoading from 'components/ButtonLoading'
 import CheckBox from 'components/CheckBox'
+import Modal from 'components/Modal'
 
 function LanguageCreate({ isOpen, closeHandle, mutateLanguage, languages }) {
   const { t } = useTranslation(['projects', 'project-edit', 'common'])
   const [isSaving, setIsSaving] = useState(false)
-
+  const [inputDirections, setInputDirections] = useState({
+    eng: calculateRtlDirection('ltr'),
+    origName: calculateRtlDirection('ltr'),
+  })
   const {
     register,
     handleSubmit,
@@ -34,6 +40,14 @@ function LanguageCreate({ isOpen, closeHandle, mutateLanguage, languages }) {
       setIsSaving(false)
     }
   }
+  const handleInputChange = (e, fieldName) => {
+    const value = e.target.value
+    const direction = calculateRtlDirection(value || '')
+    setInputDirections((prev) => ({
+      ...prev,
+      [fieldName]: direction,
+    }))
+  }
   const inputs = [
     {
       id: 1,
@@ -52,8 +66,8 @@ function LanguageCreate({ isOpen, closeHandle, mutateLanguage, languages }) {
         errors?.eng?.type === 'notUnique'
           ? t('project-edit:NameLanguageNotUnique')
           : errors?.eng?.type === 'required'
-          ? t('project-edit:NameLanguageRequired')
-          : '',
+            ? t('project-edit:NameLanguageRequired')
+            : '',
     },
     {
       id: 2,
@@ -76,6 +90,7 @@ function LanguageCreate({ isOpen, closeHandle, mutateLanguage, languages }) {
         ...register('code', {
           required: true,
           validate: {
+            wrongTypeCode: (value) => /^[a-z-]+$/i.test(value),
             notUnique: (value) => !languages?.find((el) => el.code === value),
           },
         }),
@@ -84,8 +99,10 @@ function LanguageCreate({ isOpen, closeHandle, mutateLanguage, languages }) {
         errors?.code?.type === 'notUnique'
           ? t('project-edit:CodeLanguageNotUnique')
           : errors?.code?.type === 'required'
-          ? t('project-edit:CodeLanguageRequired')
-          : '',
+            ? t('project-edit:CodeLanguageRequired')
+            : errors?.code?.type === 'wrongTypeCode'
+              ? t('project-edit:LanguageCodeMessageErrorWrongType')
+              : '',
     },
   ]
   return (
@@ -95,7 +112,12 @@ function LanguageCreate({ isOpen, closeHandle, mutateLanguage, languages }) {
           {inputs.map((input) => (
             <div key={input.id} className="space-y-2">
               <div>{input.title}</div>
-              <input {...input.register} className={input.className} />
+              <input
+                {...input.register}
+                className={input.className}
+                onChange={(e) => handleInputChange(e, input.register.name)}
+                dir={inputDirections[input.register.name]}
+              />
               <div className="text-th-invalid">{input.errorMessage}</div>
             </div>
           ))}
@@ -104,7 +126,7 @@ function LanguageCreate({ isOpen, closeHandle, mutateLanguage, languages }) {
 
           <div className="flex justify-center">
             <div className="flex gap-4 text-xl">
-              <ButtonLoading className="relative btn-secondary" isLoading={isSaving}>
+              <ButtonLoading className="btn-secondary relative" isLoading={isSaving}>
                 {t('common:Save')}
               </ButtonLoading>
               <button type="button" className="btn-secondary" onClick={closeHandle}>

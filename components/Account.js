@@ -2,17 +2,13 @@ import { Fragment, useEffect, useState } from 'react'
 
 import { useRouter } from 'next/router'
 
-import { useTranslation } from 'next-i18next'
-
 import { Menu, Tab } from '@headlessui/react'
+import { useTranslation } from 'next-i18next'
 
 import ProjectCreate from './ProjectCreate'
 import Projects from './Projects'
-import MobileMenu from './Panel/UI/MobileMenu'
 
 import { useCurrentUser } from 'lib/UserContext'
-
-import Plus from 'public/plus.svg'
 
 const sizeTabs = {
   1: 'w-1/6',
@@ -24,9 +20,9 @@ const sizeTabs = {
 }
 
 function Account() {
+  const [selectedTab, setSelectedTab] = useState(0)
   const { user, loading } = useCurrentUser()
   const router = useRouter()
-  const [openInternalMenu, setOpenInternalMenu] = useState(false)
 
   const { t } = useTranslation(['users', 'project-edit'])
 
@@ -35,24 +31,40 @@ function Account() {
       router.push('/')
     }
   }, [router, user, loading])
+
+  useEffect(() => {
+    if (router.query?.tab) {
+      setSelectedTab(parseInt(router.query?.tab))
+    }
+  }, [router])
+
+  useEffect(() => {
+    router.push(`?tab=${selectedTab}`, undefined, { shallow: true })
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedTab])
+
   const tabs = ['Account', 'projects:Projects', 'projects:CreateProject']
   return (
     <>
       <div className="mx-auto max-w-7xl">
         {user?.id && (
           <>
-            <Tab.Group as="div" className="block sm:hidden">
-              <Tab.List className="flex p-1 w-full bg-th-secondary-10 border border-th-secondary-300 rounded-3xl shadow-md">
+            <Tab.Group
+              as="div"
+              className="block sm:hidden"
+              selectedIndex={selectedTab}
+              onChange={setSelectedTab}
+            >
+              <Tab.List className="flex w-full rounded-3xl border border-th-secondary-300 bg-th-secondary-10 p-1 shadow-md">
                 {tabs
                   .filter((el) => el !== 'projects:CreateProject')
                   .map((tab) => (
                     <Tab as={Fragment} key={tab}>
                       {({ selected }) => (
                         <div
-                          className={`p-2 w-full text-center rounded-3xl cursor-pointer ${
+                          className={`w-full cursor-pointer rounded-3xl p-2 text-center ${
                             selected ? 'bg-th-primary-100 text-th-text-secondary-100' : ''
-                          }
-                      `}
+                          } `}
                         >
                           {t(tab)}
                         </div>
@@ -70,7 +82,12 @@ function Account() {
                 </Tab.Panel>
               </Tab.Panels>
             </Tab.Group>
-            <Tab.Group as="div" className="hidden sm:block">
+            <Tab.Group
+              as="div"
+              className="hidden sm:block"
+              selectedIndex={selectedTab}
+              onChange={setSelectedTab}
+            >
               <Tab.List
                 className={`flex px-5 ${
                   sizeTabs[
@@ -80,7 +97,7 @@ function Account() {
                         tab !== 'projects:CreateProject'
                     ).length
                   ]
-                } gap-4 mt-2 text-center font-bold`}
+                } mt-2 gap-4 text-center font-bold`}
               >
                 {tabs.map(
                   (tab) =>
@@ -98,8 +115,8 @@ function Account() {
                 )}
               </Tab.List>
               <Tab.Panels className="pb-10">
-                <div className="px-10 h-10 bg-th-primary-500 rounded-t-3xl"></div>
-                <div className="px-5 border border-th-secondary-300 bg-th-secondary-10 rounded-b-2xl">
+                <div className="h-10 rounded-t-3xl bg-th-primary-500 px-10"></div>
+                <div className="rounded-b-2xl border border-th-secondary-300 bg-th-secondary-10 px-5">
                   <Tab.Panel>
                     <Projects type={'account'} />
                   </Tab.Panel>
@@ -115,45 +132,6 @@ function Account() {
           </>
         )}
       </div>
-      {user?.is_admin && (
-        <MobileMenu
-          onClose={() => setOpenInternalMenu(false)}
-          hideCloseButton={openInternalMenu}
-          btnPositionHeight="bottom-[15vh]"
-          mainHeight="h-[15vh]"
-        >
-          <Menu.Items>
-            <Menu.Item as="div" className="flex justify-center items-center h-[15vh]">
-              <Menu>
-                <Menu.Button>
-                  <div
-                    className={`py-2 px-7 text-th-text-secondary-100 cursor-pointer bg-th-primary-100 rounded-3xl ${
-                      openInternalMenu ? 'hidden' : 'block'
-                    }`}
-                    onClick={() => setOpenInternalMenu(true)}
-                  >
-                    {t('project-edit:CreateNewProject')}
-                  </div>
-                </Menu.Button>
-              </Menu>
-            </Menu.Item>
-          </Menu.Items>
-        </MobileMenu>
-      )}
-
-      {openInternalMenu && (
-        <div className="fixed inset-0 px-5 pb-4 mt-14 min-h-screen z-20 overflow-y-scroll bg-th-secondary-10">
-          <div className="flex justify-end -mb-7">
-            <button
-              className="p-4 mt-4 rounded-full shadow-2xl text-th-text-secondary-100 bg-th-primary-100"
-              onClick={() => setOpenInternalMenu(false)}
-            >
-              <Plus className="w-7 h-7 rotate-45" />
-            </button>
-          </div>
-          <ProjectCreate />
-        </div>
-      )}
     </>
   )
 }

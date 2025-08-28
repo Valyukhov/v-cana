@@ -1,7 +1,9 @@
-import axios from 'axios'
 import usfm from 'usfm-js'
 
+import axios from '../../../lib/axios'
+
 import { parseChapter } from 'utils/usfmHelper'
+
 /**
  *  @swagger
  *  /api/git/bible:
@@ -84,6 +86,11 @@ export default async function bibleHandler(req, res) {
     const data = parseChapter(jsonData.chapters[chapter], verses).filter(
       (el) => el.verse !== 'front'
     )
+    data.sort((a, b) => {
+      const verseA = a.verse.match(/^\d+/)
+      const verseB = b.verse.match(/^\d+/)
+      return parseInt(verseA[0]) - parseInt(verseB[0])
+    })
 
     return res.status(200).json({ verseObjects: data })
   } catch (error) {

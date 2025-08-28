@@ -1,29 +1,33 @@
 import { useEffect, useMemo, useState } from 'react'
 
-import { useRouter } from 'next/router'
 import dynamic from 'next/dynamic'
+import { useRouter } from 'next/router'
 
-import { useTranslation } from 'next-i18next'
-
+import { Disclosure } from '@headlessui/react'
 import axios from 'axios'
-
+import { useTranslation } from 'next-i18next'
 import toast from 'react-hot-toast'
 
-import { removeCacheNote, saveCacheNote } from 'utils/helper'
-import { useCurrentUser } from 'lib/UserContext'
-import { useAccess, useAllWords, useProject } from 'utils/hooks'
+import { calculateRtlDirection } from '@texttree/notepad-rcl'
 
 import Modal from 'components/Modal'
+
 import MenuButtons from '../UI/MenuButtons'
 
-import ArrowRight from 'public/arrow-right.svg'
-import ArrowLeft from 'public/arrow-left.svg'
-import Back from 'public/left.svg'
-import Trash from 'public/trash.svg'
-import Plus from 'public/plus.svg'
-import Export from 'public/export.svg'
-import Import from 'public/import.svg'
-import Close from 'public/close.svg'
+import { useCurrentUser } from 'lib/UserContext'
+
+import { removeCacheNote, saveCacheNote } from 'utils/helper'
+import { useAccess, useAllWords, useProject } from 'utils/hooks'
+
+import ArrowDown from 'public/icons/arrow-down.svg'
+import ArrowLeft from 'public/icons/arrow-left.svg'
+import ArrowRight from 'public/icons/arrow-right.svg'
+import Close from 'public/icons/close.svg'
+import Export from 'public/icons/export.svg'
+import Import from 'public/icons/import.svg'
+import Back from 'public/icons/left.svg'
+import Plus from 'public/icons/plus.svg'
+import Trash from 'public/icons/trash.svg'
 
 const Redactor = dynamic(
   () => import('@texttree/notepad-rcl').then((mod) => mod.Redactor),
@@ -47,7 +51,8 @@ function Dictionary({ config }) {
   const [activeWord, setActiveWord] = useState()
   const [wordId, setWordId] = useState('')
   const [words, setWords] = useState(null)
-  const isRtl = config?.isRtl || false
+  const [termDirection, setTermDirection] = useState('ltr')
+  const [titleDirection, setTitleDirection] = useState('ltr')
 
   const { t } = useTranslation(['common, error'])
   const { user } = useCurrentUser()
@@ -353,9 +358,7 @@ function Dictionary({ config }) {
     setAlphabetProject(project?.dictionaries_alphabet)
   }, [project])
 
-  const classNameButtonIcon = `flex items-center gap-2.5 py-1 pl-2.5 ${
-    isRtl ? 'pr-2' : 'pr-7'
-  }`
+  const classNameButtonIcon = `flex items-center gap-2.5 py-1 pl-2.5`
   const menuItems = {
     menu: [
       {
@@ -390,59 +393,92 @@ function Dictionary({ config }) {
 
   const dropMenuClassNames = { container: menuItems.container, item: menuItems.item }
 
+  useEffect(() => {
+    if (activeWord?.title) {
+      setTitleDirection(calculateRtlDirection(activeWord.title))
+    }
+  }, [activeWord?.title])
+
   return (
-    <div dir={isRtl ? 'rtl' : 'ltr'} className="relative">
-      {!activeWord ? (
-        <>
-          <div className="flex gap-4 items-start">
-            {isModeratorAccess && (
-              <>
-                <div className="flex w-full gap-2 justify-end ltr:flex-row rtl:flex-row-reverse">
-                  <button
-                    className="btn-tertiary p-3"
-                    onClick={addNote}
-                    title={t('common:AddWord')}
-                  >
-                    <Plus className="w-6 h-6 stroke-th-text-secondary-100 stroke-2" />
-                  </button>
-                  <MenuButtons
-                    classNames={dropMenuClassNames}
-                    menuItems={dropMenuItems}
-                  />
-                </div>
-              </>
-            )}
-          </div>
-          <div>
-            <Alphabet
-              alphabet={alphabetProject}
-              getAll={getAll}
-              setSearchQuery={setSearchQuery}
-              setCurrentPageWords={setCurrentPageWords}
-              t={t}
-              isRtl={isRtl}
-            />
-            <div className="relative flex items-center mt-2 ml-2">
-              <input
-                className="input-primary"
-                value={searchQuery}
-                onChange={(e) => {
-                  setCurrentPageWords(0)
-                  setSearchQuery(e.target.value)
-                }}
-                placeholder={t('common:Search')}
-              />
-              {searchQuery && (
-                <Close
-                  className={`absolute р-6 w-6 z-10 cursor-pointer ${
-                    isRtl ? 'left-1' : 'right-1 '
-                  }`}
-                  onClick={getAll}
+    <div className="relative">
+      <div className="flex w-full items-start gap-4">
+        {isModeratorAccess && (
+          <div className="w-full">
+            <div className="flex w-full gap-2 rtl:flex-row-reverse">
+              <div className="relative mb-3 flex grow items-center" dir={termDirection}>
+                <input
+                  disabled={!!activeWord}
+                  className="input-primary h-full"
+                  value={searchQuery}
+                  onChange={(e) => {
+                    setTermDirection(calculateRtlDirection(e.target.value))
+                    setCurrentPageWords(0)
+                    setSearchQuery(e.target.value)
+                  }}
+                  placeholder={t('common:Search')}
                 />
-              )}
+                {searchQuery && (
+                  <button
+                    disabled={!!activeWord}
+                    onClick={getAll}
+                    className="р-6 absolute z-10 w-6 cursor-pointer disabled:cursor-auto disabled:opacity-70 ltr:right-1 rtl:left-1"
+                  >
+                    <Close />
+                  </button>
+                )}
+              </div>
+              <div className="flex gap-2">
+                <button
+                  disabled={!!activeWord}
+                  className={`btn-tertiary mb-3 p-3 ${!!activeWord ? 'opacity-70' : ''}`}
+                  onClick={addNote}
+                  title={t('common:AddWord')}
+                >
+                  <Plus className="h-6 w-6 stroke-th-text-secondary-100 stroke-2" />
+                </button>
+                <MenuButtons
+                  disabled={!!activeWord}
+                  classNames={dropMenuClassNames}
+                  menuItems={dropMenuItems}
+                />
+              </div>
+            </div>
+            <div>
+              <Disclosure defaultOpen>
+                {({ open }) => (
+                  <>
+                    <Disclosure.Panel>
+                      <Alphabet
+                        disabled={!!activeWord}
+                        alphabet={alphabetProject}
+                        getAll={getAll}
+                        setSearchQuery={setSearchQuery}
+                        setCurrentPageWords={setCurrentPageWords}
+                        t={t}
+                      />
+                    </Disclosure.Panel>
+                    <Disclosure.Button className="w-full text-th-secondary-300">
+                      <div className="mb-4 flex w-full flex-col items-center justify-center">
+                        <div className="mb-3 h-px w-full bg-gray-450" />
+                        <div className="flex gap-2">
+                          <p>{t('common:Symbols')}</p>
+                          <ArrowDown
+                            className={`h-5 w-5 stroke-gray-450 ${
+                              open ? 'rotate-180' : ''
+                            }`}
+                          />
+                        </div>
+                      </div>
+                    </Disclosure.Button>
+                  </>
+                )}
+              </Disclosure>
             </div>
           </div>
-
+        )}
+      </div>
+      {!activeWord ? (
+        <>
           {words?.data?.length ? (
             <div className="mt-2">
               <ListOfNotes
@@ -453,17 +489,17 @@ function Dictionary({ config }) {
                 }}
                 setNoteId={setWordId}
                 classes={{
-                  item: 'flex justify-between items-start rounded-lg cursor-pointer group hover:bg-th-secondary-100',
-                  title: 'font-bold p-2 mr-4',
+                  item: 'flex w-full rounded-lg cursor-pointer group hover:bg-th-secondary-100',
+                  title: 'font-bold p-2 mr-4 flex',
                   text: 'px-2 h-10 overflow-hidden',
                   delBtn: 'p-2 m-1 top-0 opacity-0 group-hover:opacity-100',
+                  titleBlock: 'flex justify-between items-center w-full',
                 }}
                 isShowDelBtn={isModeratorAccess}
-                delBtnChildren={<Trash className="w-4 h-4 stroke-th-text-primary" />}
-                isRtl={isRtl}
+                delBtnChildren={<Trash className="h-4 w-4 stroke-th-text-primary" />}
               />
               {totalPageCount > 1 && (
-                <div className="flex justify-around bottom-0 left-0">
+                <div className="bottom-0 left-0 flex justify-around">
                   <button
                     className="arrow"
                     disabled={currentPageWords === 0}
@@ -474,7 +510,7 @@ function Dictionary({ config }) {
                       })
                     }
                   >
-                    <ArrowLeft className="w-5 h-5 stroke-th-text-primary" />
+                    <ArrowLeft className="h-5 w-5 stroke-th-text-primary" />
                   </button>
                   <button
                     className="arrow"
@@ -486,7 +522,7 @@ function Dictionary({ config }) {
                       })
                     }}
                   >
-                    <ArrowRight className="w-5 h-5 stroke-th-text-primary" />
+                    <ArrowRight className="h-5 w-5 stroke-th-text-primary" />
                   </button>
                 </div>
               )}
@@ -496,9 +532,9 @@ function Dictionary({ config }) {
           )}
         </>
       ) : (
-        <>
+        <div className="relative" dir={titleDirection}>
           <div
-            className="flex w-fit p-1 cursor-pointer hover:opacity-70 rounded-full bg-th-secondary-100"
+            className="absolute left-0 top-0 flex w-fit cursor-pointer rounded-full bg-th-secondary-100 p-1 hover:opacity-70"
             onClick={() => {
               saveWord()
               setActiveWord(null)
@@ -509,8 +545,9 @@ function Dictionary({ config }) {
           </div>
           <Redactor
             classes={{
-              wrapper: '',
-              title: 'bg-th-secondary-100 p-2 my-4 font-bold rounded-lg shadow-md',
+              wrapper: 'flex flex-col',
+              title:
+                'bg-th-secondary-100 ml-12 p-2 mb-4 font-bold rounded-lg shadow-md grow',
               redactor:
                 'p-4 my-4 pb-20 bg-th-secondary-100 overflow-hidden break-words rounded-lg shadow-md',
             }}
@@ -519,13 +556,12 @@ function Dictionary({ config }) {
             readOnly={!isModeratorAccess}
             placeholder={isModeratorAccess ? t('common:TextDescriptionWord') : ''}
             isSelectableTitle
-            isRtl={isRtl}
           />
-        </>
+        </div>
       )}
 
       <Modal isOpen={isOpenModal} closeHandle={() => setIsOpenModal(false)}>
-        <div className="flex flex-col gap-7 items-center">
+        <div className="flex flex-col items-center gap-7">
           <div className="text-center text-2xl">
             {t('common:AreYouSureDelete') +
               ' ' +
@@ -564,32 +600,34 @@ function Dictionary({ config }) {
 
 export default Dictionary
 
-function Alphabet({ alphabet, getAll, setCurrentPageWords, setSearchQuery, t }) {
+function Alphabet({
+  alphabet,
+  getAll,
+  setCurrentPageWords,
+  setSearchQuery,
+  t,
+  disabled,
+}) {
   const uniqueAlphabet = [...new Set(alphabet)]
 
   return (
-    <div className="flex flex-wrap">
+    <div className="grid w-full grid-cols-12 rounded-xl bg-th-secondary-100 p-1 text-th-text-primary">
       {uniqueAlphabet &&
         uniqueAlphabet
           .sort((a, b) => a.localeCompare(b))
           .map((letter, index) => (
-            <div
+            <button
               key={`${letter}_${index}`}
               onClick={() => {
                 setCurrentPageWords(0)
                 setSearchQuery(letter.toLowerCase())
               }}
-              className="py-1 px-3 rounded-md cursor-pointer hover:bg-th-secondary-100"
+              disabled={disabled}
+              className="cursor-pointer rounded-md py-1 hover:bg-th-secondary-200 disabled:cursor-auto disabled:hover:bg-th-secondary-100"
             >
               {letter}
-            </div>
+            </button>
           ))}
-      <div
-        className="py-1 px-3 rounded-md cursor-pointer hover:bg-th-secondary-100"
-        onClick={getAll}
-      >
-        {t('common:ShowAll')}
-      </div>
     </div>
   )
 }

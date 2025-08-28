@@ -1,35 +1,44 @@
 import { useEffect, useState } from 'react'
 
-import { useRouter } from 'next/router'
 import dynamic from 'next/dynamic'
+import { useRouter } from 'next/router'
 
 import axios from 'axios'
 import { useTranslation } from 'next-i18next'
 import { toast } from 'react-hot-toast'
 import { useRecoilValue } from 'recoil'
 
+import { calculateRtlDirection } from '@texttree/notepad-rcl'
+
 import Modal from 'components/Modal'
+import { projectIdState } from 'components/state/atoms'
+
 import MenuButtons from '../UI/MenuButtons'
 
 import { useCurrentUser } from 'lib/UserContext'
-import useSupabaseClient from 'utils/supabaseClient'
-import { checkLSVal, convertNotesToTree, formationJSONToTree } from 'utils/helper'
-import { useTeamNotes, useProject, useAccess, useAllTeamlNotes } from 'utils/hooks'
-import { removeCacheNote, saveCacheNote } from 'utils/helper'
-import { projectIdState } from 'components/state/atoms'
 
-import Back from 'public/left.svg'
-import Trash from 'public/trash.svg'
-import FileIcon from 'public/file-icon.svg'
-import CloseFolder from 'public/close-folder.svg'
-import OpenFolder from 'public/open-folder.svg'
-import ArrowDown from 'public/folder-arrow-down.svg'
-import ArrowRight from 'public/folder-arrow-right.svg'
-import Rename from 'public/rename.svg'
-import Export from 'public/export.svg'
-import Import from 'public/import.svg'
-import Close from 'public/close.svg'
-import Progress from 'public/progress.svg'
+import {
+  checkLSVal,
+  convertNotesToTree,
+  formationJSONToTree,
+  removeCacheNote,
+  saveCacheNote,
+} from 'utils/helper'
+import { useAccess, useAllTeamlNotes, useProject, useTeamNotes } from 'utils/hooks'
+import useSupabaseClient from 'utils/supabaseClient'
+
+import CloseFolder from 'public/icons/close-folder.svg'
+import Close from 'public/icons/close.svg'
+import Export from 'public/icons/export.svg'
+import FileIcon from 'public/icons/file-icon.svg'
+import ArrowDown from 'public/icons/folder-arrow-down.svg'
+import ArrowRight from 'public/icons/folder-arrow-right.svg'
+import Import from 'public/icons/import.svg'
+import Back from 'public/icons/left.svg'
+import OpenFolder from 'public/icons/open-folder.svg'
+import Progress from 'public/icons/progress.svg'
+import Rename from 'public/icons/rename.svg'
+import Trash from 'public/icons/trash.svg'
 
 const Redactor = dynamic(
   () => import('@texttree/notepad-rcl').then((mod) => mod.Redactor),
@@ -53,11 +62,11 @@ const TreeView = dynamic(
 )
 
 const icons = {
-  file: <FileIcon className={'w-6 h-6'} />,
+  file: <FileIcon className={'h-6 w-6'} />,
   arrowDown: <ArrowDown className={'stroke-2'} />,
   arrowRight: <ArrowRight className={'stroke-2'} />,
-  openFolder: <OpenFolder className={'w-6 h-6 stroke-[1.7]'} />,
-  closeFolder: <CloseFolder className={'w-6 h-6'} />,
+  openFolder: <OpenFolder className={'h-6 w-6 stroke-[1.7]'} />,
+  closeFolder: <CloseFolder className={'h-6 w-6'} />,
 }
 
 function TeamNotes({ config }) {
@@ -72,9 +81,10 @@ function TeamNotes({ config }) {
   const [isOpenModal, setIsOpenModal] = useState(false)
   const { t } = useTranslation(['common', 'error'])
   const [term, setTerm] = useState('')
+  const [termDirection, setTermDirection] = useState('ltr')
+  const [titleDirection, setTitleDirection] = useState('ltr')
   const { user } = useCurrentUser()
   const [allNotes] = useAllTeamlNotes()
-  const isRtl = config?.isRtl || false
 
   const {
     query: { project: code },
@@ -356,7 +366,7 @@ function TeamNotes({ config }) {
     }
   }
 
-  const classNameButtonIcon = 'flex items-center gap-2.5 py-1 pl-2.5 ltr:pr-7 rtl:pr-2'
+  const classNameButtonIcon = 'flex items-center gap-2.5 py-1 pl-2.5'
   const menuItems = {
     contextMenu: [
       {
@@ -441,29 +451,48 @@ function TeamNotes({ config }) {
 
   const dropMenuClassNames = { container: menuItems.container, item: menuItems.item }
 
+  useEffect(() => {
+    if (activeNote?.title) {
+      setTitleDirection(calculateRtlDirection(activeNote.title))
+    }
+  }, [activeNote?.title])
+
   return (
-    <div dir={isRtl ? 'rtl' : 'ltr'} className="relative">
+    <div className="relative">
+      <div className="flex flex-row-reverse gap-2 rtl:flex-row">
+        {isModeratorAccess && (
+          <div className="flex ltr:justify-end rtl:justify-start">
+            <MenuButtons
+              disabled={activeNote && Object.keys(activeNote)?.length}
+              classNames={dropMenuClassNames}
+              menuItems={dropMenuItems}
+            />
+          </div>
+        )}
+        <div className="relative mb-3 flex grow items-center" dir={termDirection}>
+          <input
+            disabled={activeNote && Object.keys(activeNote)?.length}
+            className="input-primary h-full flex-1"
+            value={term}
+            onChange={(event) => {
+              setTermDirection(calculateRtlDirection(event.target.value))
+              setTerm(event.target.value)
+            }}
+            placeholder={t('Search')}
+          />
+          {term && (
+            <button
+              disabled={activeNote && Object.keys(activeNote)?.length}
+              onClick={() => setTerm('')}
+              className="р-6 absolute z-10 w-6 cursor-pointer disabled:cursor-auto disabled:opacity-70 ltr:right-1 rtl:left-1"
+            >
+              <Close />
+            </button>
+          )}
+        </div>
+      </div>
       {!activeNote || !Object.keys(activeNote)?.length ? (
         <div>
-          {isModeratorAccess && (
-            <div className="flex ltr:justify-end rtl:justify-start w-full">
-              <MenuButtons classNames={dropMenuClassNames} menuItems={dropMenuItems} />
-            </div>
-          )}
-          <div className="relative flex items-center mb-4">
-            <input
-              className="input-primary flex-1"
-              value={term}
-              onChange={(event) => setTerm(event.target.value)}
-              placeholder={t('Search')}
-            />
-            {term && (
-              <Close
-                className="absolute р-6 w-6 z-10 cursor-pointer ltr:right-1 rtl:left-1"
-                onClick={() => setTerm('')}
-              />
-            )}
-          </div>
           {!isLoading || notes?.length ? (
             <TreeView
               term={term}
@@ -474,7 +503,7 @@ function TeamNotes({ config }) {
                   'px-5 leading-[47px] text-lg cursor-pointer rounded-lg bg-th-secondary-100 hover:bg-th-secondary-200 ltr:flex',
                 nodeTextBlock: 'items-center truncate',
               }}
-              data={dataForTreeView}
+              data={dataForTreeView || []}
               setSelectedNodeId={setNoteId}
               selectedNodeId={noteId}
               treeWidth="w-full"
@@ -487,10 +516,9 @@ function TeamNotes({ config }) {
               handleRenameNode={handleRenameNode}
               handleDragDrop={isModeratorAccess ? handleDragDrop : null}
               openByDefault={false}
-              isRtl={isRtl}
             />
           ) : (
-            <Progress className="progress-custom-colors w-14 animate-spin stroke-th-primary-100 mx-auto" />
+            <Progress className="progress-custom-colors mx-auto w-14 animate-spin stroke-th-primary-100" />
           )}
           {isModeratorAccess && (
             <ContextMenu
@@ -504,14 +532,13 @@ function TeamNotes({ config }) {
                 menuContainer: menuItems.container.className,
                 emptyMenu: 'p-2.5 cursor-pointer text-gray-300',
               }}
-              isRtl={isRtl}
             />
           )}
         </div>
       ) : (
-        <>
+        <div className="relative" dir={titleDirection}>
           <div
-            className="flex w-fit p-1 cursor-pointer hover:opacity-70 rounded-full bg-th-secondary-100"
+            className="absolute left-0 top-0 flex w-fit cursor-pointer rounded-full bg-th-secondary-100 p-1 hover:opacity-70"
             onClick={() => {
               saveNote()
               setActiveNote(null)
@@ -523,7 +550,9 @@ function TeamNotes({ config }) {
           </div>
           <Redactor
             classes={{
-              title: 'p-2 my-4 font-bold bg-th-secondary-100 rounded-lg shadow-md',
+              wrapper: 'flex flex-col',
+              title:
+                'bg-th-secondary-100 ml-12 p-2 mb-4 font-bold rounded-lg shadow-md grow',
               redactor:
                 'pb-20 pt-4 px-4 my-4 bg-th-secondary-100 overflow-hidden break-words rounded-lg shadow-md',
             }}
@@ -533,16 +562,15 @@ function TeamNotes({ config }) {
             placeholder={isModeratorAccess ? t('TextNewNote') : ''}
             emptyTitle={t('EmptyTitle')}
             isSelectableTitle
-            isRtl={isRtl}
           />
-        </>
+        </div>
       )}
       <Modal isOpen={isOpenModal} closeHandle={() => setIsOpenModal(false)}>
-        <div className="flex flex-col gap-7 items-center">
+        <div className="flex flex-col items-center gap-7">
           <div className="text-center text-2xl">
             {t('AreYouSureDelete') + ' ' + currentNodeProps?.node.data.name || '' + '?'}
           </div>
-          <div className="flex gap-7 w-1/2">
+          <div className="flex w-1/2 gap-7">
             <button
               className="btn-secondary flex-1"
               onClick={() => {
